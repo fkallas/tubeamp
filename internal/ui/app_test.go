@@ -543,11 +543,16 @@ func TestLogoVisibilityBoundary(t *testing.T) {
 // TestLayoutInvariantAcrossHeights sweeps heights spanning the (taller, 3-row)
 // logo boundary and asserts the rendered view always totals exactly the terminal
 // height with full-width rows — i.e. the 3-row logo never makes the panel area
-// overflow or clip at the minimum sizes.
+// overflow or clip at the minimum sizes. The sign-in indicator is set to an
+// account name wider than the terminal, so the sweep also proves the indicator
+// truncates on BOTH of its homes: the logo rule row (logo shown) and the bottom
+// status row (logo hidden) — an unclipped indicator would widen one row and make
+// JoinVertical pad every row past the terminal width.
 func TestLayoutInvariantAcrossHeights(t *testing.T) {
 	for _, w := range []int{minWidth, 120} {
 		for h := minHeight; h <= logoMinTermHeight+3; h++ {
 			m := newTestModel(t, w, h)
+			m = send(m, accountInfoMsg{name: strings.Repeat("N", 124), signedIn: true})
 			lines := strings.Split(m.View(), "\n")
 			if len(lines) != h {
 				t.Errorf("%dx%d: view has %d rows, want %d", w, h, len(lines), h)
@@ -1210,6 +1215,36 @@ func TestAutoRefresh_skippedWithoutAuthFile(t *testing.T) {
 	_, cmd := m.Update(accountInfoMsg{signedIn: false})
 	if cmd != nil {
 		t.Error("no reimport Cmd should fire without an auth file present")
+	}
+}
+
+// TestAlbumViewSurvivesLateLibraryLoad: opening an album view while a library
+// load is in flight invalidates that load — the trailing libTracksMsg must not
+// setMain over the just-pushed album view. (The inverse ordering was already
+// guarded: setMain bumps albumGen.) Reachable since 'o' works on queue/song
+// rows: enter on a playlist, focus the queue, 'o' on a row, playlist lands.
+func TestAlbumViewSurvivesLateLibraryLoad(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+
+	// A library load is dispatched and still in flight at this generation…
+	m.libGen++
+	pending := m.libGen
+
+	// …then an album fetch wins the race and opens the album view.
+	m.albumGen++
+	m = send(m, albumLoadMsg{gen: m.albumGen, open: true,
+		album:  model.Album{BrowseID: "MPREb_x", Title: "Neon Nights"},
+		tracks: []model.Track{{VideoID: "v1", Title: "Chrome Tears"}}})
+	if top := m.stack[len(m.stack)-1]; top.kind != mainAlbum {
+		t.Fatalf("setup: album view not on top (kind=%v)", top.kind)
+	}
+
+	// The library response trails in: it must be dropped, not replace the stack.
+	m = send(m, libTracksMsg{gen: pending, title: "Liked Songs",
+		tracks: []model.Track{{VideoID: "v2", Title: "Late Arrival"}}})
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainAlbum || top.title != "Neon Nights" {
+		t.Errorf("late library load replaced the album view: kind=%v title=%q", top.kind, top.title)
 	}
 }
 

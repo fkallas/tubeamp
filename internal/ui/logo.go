@@ -17,9 +17,12 @@ const logoHeight = 3
 
 // logoMinTermHeight is the minimum terminal height that enables the logo. Below
 // this value the logo is suppressed so the panel area is not squeezed. It tracks
-// logoHeight: the 3-row logo only appears once there is room for it without
-// shrinking the panels below their minimum (a hidden logo at height 24 leaves
-// the same panel area as a shown logo at height 25).
+// logoHeight: with the fixed chrome (player bar + hint line = 7 rows, see
+// View()), a shown logo leaves height−7−logoHeight panel rows, and this
+// threshold keeps that minimum at 15 (25−7−3) — the same floor the previous
+// 2-row logo had at its 24 threshold. Raise it in lockstep if logoHeight ever
+// grows. (Hiding the logo below the threshold gives those rows back to the
+// panels, so the panel area is never smaller than at the threshold.)
 const logoMinTermHeight = 25
 
 // appVersion is displayed in Muted style, right-aligned on the first logo row.

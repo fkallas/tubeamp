@@ -520,7 +520,9 @@ Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
 `AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently
 at the right end of the logo's rule row (ANSI-aware-truncated with an ellipsis
 when a long account name would not fit), or right-aligned on the bottom status
-line when the logo is hidden. Signed in => "● <name>" in PlayingStyle; an auth
+line when the logo is hidden (truncated the same way — on either home an
+oversized indicator must clip, never widen the row past the terminal and break
+the full-width frame invariant). Signed in => "● <name>" in PlayingStyle; an auth
 file that resolves anonymous (a stale cookie) => "○ anonymous — cookie stale?
 see README" in Muted; no auth file => "○ not signed in" in Muted. A failed check
 (network down) leaves the indicator blank (no retry). A library browse that
@@ -677,8 +679,9 @@ resolved `signedIn`), real data replaces the mock:
   and play their mock tracks locally; a mock ID never reaches a real browse.
   Both real loads show a "loading …" status while in flight and are guarded by
   `libGen` (a stale result — the user navigated away, a newer load, esc,
-  issuing a new search, or replacing the main view — is dropped, mirroring the
-  search/album generation pattern).
+  issuing a new search, replacing the main view, or opening an album view
+  ('o' is reachable mid-load, e.g. from a queue row) — is dropped, mirroring
+  the search/album generation pattern).
 
 For an **anonymous** session the mock data is kept. With a client present (the
 check resolved not-signed-in), "Liked Songs"/playlist `enter` loads the mock

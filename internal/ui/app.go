@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fkallas/tubeamp/internal/art"
 	"github.com/fkallas/tubeamp/internal/auth"
@@ -1618,8 +1619,13 @@ func (m *Model) ensureSearchFrame(query string) *mainContent {
 }
 
 // pushAlbum pushes an album detail view onto the main-view stack. esc pops back
-// to the search results with the prior cursor intact.
+// to the search results with the prior cursor intact. Pushing also invalidates
+// any in-flight library load, mirroring setMain and esc: 'o' is reachable while
+// a Liked-Songs/playlist fetch is pending (e.g. from a queue row), and that
+// trailing libTracksMsg must not setMain over the album view the user just
+// opened. (The inverse ordering is already guarded — setMain bumps albumGen.)
 func (m *Model) pushAlbum(a model.Album, tracks []model.Track) {
+	m.libGen++
 	m.stack = append(m.stack, mainContent{
 		kind:   mainAlbum,
 		title:  a.Title,
@@ -1852,6 +1858,14 @@ func (m Model) statusRow(logoShown bool, ind string) string {
 		return m.bottomLine(m.width)
 	}
 	indW := lipgloss.Width(ind)
+	// Like the logo rule row, a long account name must clip (ANSI-aware,
+	// ellipsis tail), never widen the row: an oversized indicator here would
+	// make JoinVertical pad EVERY frame row past the terminal width, hard-
+	// wrapping and garbling the whole UI.
+	if avail := m.width - 1; indW > avail {
+		ind = ansi.Truncate(ind, avail, "…")
+		indW = lipgloss.Width(ind)
+	}
 	left := m.bottomLine(m.width - indW - 1)
 	gap := m.width - lipgloss.Width(left) - indW
 	if gap < 1 {
