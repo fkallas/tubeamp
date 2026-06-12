@@ -73,7 +73,23 @@ status cell is shown).
 | `tubeamp -queue`   | the numbered queue, playing row marked `▶`                      |
 | `tubeamp -kill`    | quit the background daemon entirely                             |
 
-Example tmux status line: `set -g status-right '#(tubeamp -line)'`.
+## tmux status bar
+
+Show the now-playing track on the right-hand side of your tmux status bar by
+shelling out to `tubeamp -line`. Add this block to `~/.tmux.conf` (use the
+absolute path to the installed binary, e.g. `$(go env GOPATH)/bin/tubeamp` after
+`go install ./cmd/tubeamp`):
+
+```tmux
+set -g status-interval 5
+set -ga status-right " #(/path/to/tubeamp -line)"
+```
+
+`-ga` *appends* to `status-right`, so it sits alongside whatever you already
+display there. `status-interval 5` refreshes the cell every five seconds.
+Because `-line` prints nothing when playback is idle (or no daemon is running)
+and exits 0, the status cell stays clean instead of showing an error — the
+now-playing line simply appears once you start a track.
 
 ## Themes
 
