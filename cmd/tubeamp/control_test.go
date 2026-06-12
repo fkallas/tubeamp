@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fkallas/tubeamp/internal/config"
 )
@@ -351,7 +352,19 @@ func TestDispatchKillRemovesSocket(t *testing.T) {
 	if code := dispatchControl(&out, &errOut, config.Default(), controlFlags{kill: true}); code != 0 {
 		t.Fatalf("exit = %d, stderr = %q", code, errOut.String())
 	}
-	if !d.sawCommand("quit") {
+	// Quit() writes "quit" then closes the connection; the fake daemon records
+	// commands asynchronously in its reader goroutine, so poll rather than
+	// checking once (the command is sent — the daemon just may not have logged
+	// it the instant dispatchControl returns).
+	sawQuit := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if d.sawCommand("quit") {
+			sawQuit = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sawQuit {
 		t.Errorf("kill did not send a quit command")
 	}
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
