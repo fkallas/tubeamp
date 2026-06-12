@@ -217,7 +217,7 @@ func (m *Model) applySnapshot() {
 			if m.duration == 0 {
 				m.duration = t.Duration.Seconds()
 			}
-			m.artBlock = art.Placeholder(t.VideoID, 8, 4, art.Options{Palette: m.th.Palette()})
+			m.artBlock = art.Placeholder(t.VideoID, 8, 4, m.artOptions())
 		}
 	}
 }
@@ -504,8 +504,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.imgCache[msg.videoID] = msg.img
 		// Render once with the current theme and cache by videoID+theme.
-		s := art.Render(msg.img, 8, 4, art.Options{Palette: m.th.Palette()})
-		m.artCache[msg.videoID+"|"+m.th.Name] = s
+		s := art.Render(msg.img, 8, 4, m.artOptions())
+		m.artCache[m.artKey(msg.videoID)] = s
 		if m.hasNow && m.nowPlaying.VideoID == msg.videoID {
 			m.artBlock = s
 		}
@@ -575,7 +575,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// and let whichever view shows this album pick it up — including one
 		// re-opened while the deduped fetch was still in flight.
 		m.albumImgCache[msg.browseID] = msg.img
-		m.albumArtCache[msg.browseID+"|"+m.th.Name] = art.Render(msg.img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+		m.albumArtCache[m.artKey(msg.browseID)] = art.Render(msg.img, panels.AlbumCoverCols, panels.AlbumCoverRows, m.artOptions())
 		return m, nil
 
 	case themesLoadedMsg:
@@ -1072,28 +1072,49 @@ func (m *Model) applyPlaylistPos(pos int) tea.Cmd {
 	return m.reflectCurrent(true)
 }
 
-// refreshArt updates artBlock for the current track+theme. It prefers, in
-// order: the cached render for this theme; a local re-render of the decoded
-// image (no download — e.g. when only the theme changed); otherwise a
-// placeholder plus a one-shot fetch command, deduped so bouncing the theme
-// cursor or re-pressing enter never issues a second download for the same track.
+// artOptions returns the cover-art rendering options for the configured
+// palette mode: "theme" snaps colors to the active theme's palette, while
+// "auto" (the default) keeps the artwork's own colors, median-cut to a
+// compact pixel-art palette.
+func (m Model) artOptions() art.Options {
+	if m.cfg != nil && m.cfg.ArtPalette == config.ArtPaletteTheme {
+		return art.Options{Palette: m.th.Palette()}
+	}
+	return art.Options{PaletteSize: 16}
+}
+
+// artKey builds a render-cache key carrying everything the render depends on:
+// in theme mode the theme name (a theme switch re-renders), in auto mode just
+// the mode (renders are theme-independent).
+func (m Model) artKey(id string) string {
+	if m.cfg != nil && m.cfg.ArtPalette == config.ArtPaletteTheme {
+		return id + "|theme:" + m.th.Name
+	}
+	return id + "|auto"
+}
+
+// refreshArt updates artBlock for the current track+palette mode. It prefers,
+// in order: the cached render; a local re-render of the decoded image (no
+// download — e.g. when only the theme changed); otherwise a placeholder plus a
+// one-shot fetch command, deduped so bouncing the theme cursor or re-pressing
+// enter never issues a second download for the same track.
 func (m *Model) refreshArt() tea.Cmd {
 	if !m.hasNow {
 		m.artBlock = ""
 		return nil
 	}
 	vid := m.nowPlaying.VideoID
-	if s, ok := m.artCache[vid+"|"+m.th.Name]; ok {
+	if s, ok := m.artCache[m.artKey(vid)]; ok {
 		m.artBlock = s
 		return nil
 	}
 	if img, ok := m.imgCache[vid]; ok {
-		s := art.Render(img, 8, 4, art.Options{Palette: m.th.Palette()})
-		m.artCache[vid+"|"+m.th.Name] = s
+		s := art.Render(img, 8, 4, m.artOptions())
+		m.artCache[m.artKey(vid)] = s
 		m.artBlock = s
 		return nil
 	}
-	m.artBlock = art.Placeholder(vid, 8, 4, art.Options{Palette: m.th.Palette()})
+	m.artBlock = art.Placeholder(vid, 8, 4, m.artOptions())
 	if m.nowPlaying.ThumbURL == "" {
 		return nil
 	}
@@ -1214,12 +1235,12 @@ func (m *Model) topAlbum() (model.Album, bool) {
 // already-decoded image, otherwise a one-shot download (deduped per browseID).
 // The view falls back to a placeholder until a render is available.
 func (m *Model) ensureAlbumCover(a model.Album) tea.Cmd {
-	key := a.BrowseID + "|" + m.th.Name
+	key := m.artKey(a.BrowseID)
 	if _, ok := m.albumArtCache[key]; ok {
 		return nil
 	}
 	if img, ok := m.albumImgCache[a.BrowseID]; ok {
-		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, m.artOptions())
 		return nil
 	}
 	if a.ThumbURL == "" {
@@ -1240,22 +1261,22 @@ func (m *Model) refreshAlbumCover() {
 	if !ok {
 		return
 	}
-	key := a.BrowseID + "|" + m.th.Name
+	key := m.artKey(a.BrowseID)
 	if _, ok := m.albumArtCache[key]; ok {
 		return
 	}
 	if img, ok := m.albumImgCache[a.BrowseID]; ok {
-		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, m.artOptions())
 	}
 }
 
 // albumCoverBlock returns the rendered cover for the album view, or a procedural
 // placeholder while the real cover is loading.
 func (m Model) albumCoverBlock(a model.Album) string {
-	if s, ok := m.albumArtCache[a.BrowseID+"|"+m.th.Name]; ok {
+	if s, ok := m.albumArtCache[m.artKey(a.BrowseID)]; ok {
 		return s
 	}
-	return art.Placeholder(a.BrowseID, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+	return art.Placeholder(a.BrowseID, panels.AlbumCoverCols, panels.AlbumCoverRows, m.artOptions())
 }
 
 func (m *Model) setStatus(s string) { m.status, m.statusErr = s, false }

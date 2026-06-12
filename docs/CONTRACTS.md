@@ -60,7 +60,13 @@ type Config struct {
     Volume     int    `yaml:"volume"`      // 0-100, default 80
     MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
     YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
+    ArtPalette string `yaml:"art_palette"` // ArtPaletteAuto (default) or ArtPaletteTheme
 }
+
+const (
+    ArtPaletteAuto  = "auto"  // covers keep their own colors (median-cut)
+    ArtPaletteTheme = "theme" // covers snap to the active theme's palette
+)
 
 func Default() *Config
 func Load() (*Config, error)      // ConfigDir()/config.yaml; missing file => Default(), nil error.
@@ -436,8 +442,10 @@ func listenPlayer(p *player.Player) tea.Cmd {
   matching `player.Playlist*`/`Next`/`Prev` call in a Cmd; the index reconciles on
   the next `EvPlaylistPos`.
 - Art: player bar shows 8×4-cell cover. If `track.ThumbURL != ""` fetch via
-  Cmd (`art.Fetch` + `art.Render` with theme palette options, cache by
-  videoID+theme in the model); fallback/loading state `art.Placeholder`.
+  Cmd (`art.Fetch` + `art.Render` with options from `Model.artOptions()`:
+  `cfg.ArtPalette` "auto" → median-cut of the cover's own colors, "theme" →
+  snap to `theme.Palette()`; cache keyed by `Model.artKey` — theme-dependent
+  only in theme mode); fallback/loading state `art.Placeholder`.
   Mock thumbs: `https://i.ytimg.com/vi/<videoID>/mqdefault.jpg`.
 - Theme picker overlay: lists `theme.List(config.ThemesDir())`, live-previews
   on cursor move, `enter` = keep + `cfg.Save()` (via Cmd), `esc` = revert.
@@ -447,8 +455,8 @@ func listenPlayer(p *player.Player) tea.Cmd {
   whichever returns first, fill the other section on arrival; on error or nil
   client, status-line message.
 - Album cover (album view): fetch via Cmd from `RewriteThumbURL(thumb, 64)`,
-  render 16×8 with theme palette options, `Placeholder` while loading, cache by
-  browseID+theme (mirrors the player-bar art caching).
+  render 16×8 with the same `artOptions()`/`artKey` scheme as the player bar,
+  `Placeholder` while loading.
 - Status line doubles as transient error/info toast (e.g. "mpv not found —
   playback disabled").
 - Use `lipgloss.Width`/`Height` for layout math on styled strings, never `len()`.

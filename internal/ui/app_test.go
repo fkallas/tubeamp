@@ -118,6 +118,28 @@ func TestCursorMovesWithJK(t *testing.T) {
 	}
 }
 
+func TestArtOptionsFollowPaletteMode(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+
+	// Default ("auto"): covers keep their own colors via median-cut, and the
+	// cache key is theme-independent.
+	if o := m.artOptions(); o.Palette != nil || o.PaletteSize <= 0 {
+		t.Errorf("auto art options = %+v, want PaletteSize>0 and no fixed palette", o)
+	}
+	if k := m.artKey("vid"); strings.Contains(k, m.th.Name) {
+		t.Errorf("auto artKey %q must not depend on the theme", k)
+	}
+
+	// "theme": covers snap to the theme palette and re-render per theme.
+	m.cfg.ArtPalette = config.ArtPaletteTheme
+	if o := m.artOptions(); len(o.Palette) == 0 {
+		t.Errorf("theme art options = %+v, want the theme palette", m.artOptions())
+	}
+	if k := m.artKey("vid"); !strings.Contains(k, m.th.Name) {
+		t.Errorf("theme artKey %q must include the theme name", k)
+	}
+}
+
 func TestHelpOverlayOpensAndCloses(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	m = send(m, runes("?"))
@@ -466,8 +488,8 @@ func TestLateAlbumCoverIsCached(t *testing.T) {
 	if _, ok := m.albumImgCache[a.BrowseID]; !ok {
 		t.Error("decoded cover not cached by browseID")
 	}
-	if _, ok := m.albumArtCache[a.BrowseID+"|"+m.th.Name]; !ok {
-		t.Error("rendered cover not cached for the current theme")
+	if _, ok := m.albumArtCache[m.artKey(a.BrowseID)]; !ok {
+		t.Error("rendered cover not cached under the current palette mode key")
 	}
 }
 

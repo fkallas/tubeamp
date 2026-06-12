@@ -111,6 +111,9 @@ func TestLoadPartialYAML(t *testing.T) {
 	if cfg.YTDLFormat != "bestaudio" {
 		t.Errorf("YTDLFormat (unset): got %q, want bestaudio", cfg.YTDLFormat)
 	}
+	if cfg.ArtPalette != ArtPaletteAuto {
+		t.Errorf("ArtPalette (unset): got %q, want %q", cfg.ArtPalette, ArtPaletteAuto)
+	}
 }
 
 func TestLoadZeroVolume(t *testing.T) {

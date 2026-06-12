@@ -109,6 +109,10 @@ Built-ins: catppuccin-mocha, catppuccin-latte, gruvbox-dark, nord, dracula,
 tokyo-night. Drop your own YAML in `~/.config/tubeamp/themes/` and set
 `theme: <name>` in `~/.config/tubeamp/config.yaml`, or pick live with `T`.
 
+Pixel-art covers render in the artwork's own colors by default
+(`art_palette: auto` in config.yaml). Set `art_palette: theme` to quantize
+covers to the active theme's palette instead, so the art always matches the UI.
+
 ## Architecture
 
 See `docs/CONTRACTS.md` for the package layout and public APIs.

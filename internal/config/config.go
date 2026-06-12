@@ -9,12 +9,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Art palette modes for rendered cover art.
+const (
+	// ArtPaletteAuto renders covers with their own colors (median-cut to a
+	// compact pixel-art palette).
+	ArtPaletteAuto = "auto"
+	// ArtPaletteTheme snaps cover colors to the active theme's palette.
+	ArtPaletteTheme = "theme"
+)
+
 // Config holds tubeamp's user settings.
 type Config struct {
 	Theme      string `yaml:"theme"`       // catppuccin-mocha by default
 	Volume     int    `yaml:"volume"`      // 0-100, default 80; 0 treated as unset
 	MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
 	YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
+	ArtPalette string `yaml:"art_palette"` // "auto" (default) or "theme"
 }
 
 // Default returns the default configuration.
@@ -24,6 +34,7 @@ func Default() *Config {
 		Volume:     80,
 		MPVPath:    "mpv",
 		YTDLFormat: "bestaudio",
+		ArtPalette: ArtPaletteAuto,
 	}
 }
 
@@ -56,6 +67,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.YTDLFormat == "" {
 		cfg.YTDLFormat = "bestaudio"
+	}
+	if cfg.ArtPalette == "" {
+		cfg.ArtPalette = ArtPaletteAuto
 	}
 
 	return cfg, nil
