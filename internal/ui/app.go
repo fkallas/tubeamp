@@ -42,6 +42,8 @@ const (
 	focusPlaylists
 	focusQueue
 	focusMain
+
+	focusCount // number of focusable panels, for h/l cycling
 )
 
 // overlayKind identifies which modal overlay (if any) is open.
@@ -659,6 +661,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setFocus(focusQueue)
 	case key.Matches(msg, k.Focus4):
 		m.setFocus(focusMain)
+	case key.Matches(msg, k.FocusNext):
+		m.setFocus((m.focus + 1) % focusCount)
+	case key.Matches(msg, k.FocusPrev):
+		m.setFocus((m.focus + focusCount - 1) % focusCount)
 
 	case key.Matches(msg, k.Esc):
 		if len(m.stack) > 1 {
@@ -1393,27 +1399,27 @@ func (m Model) contextHints() []hint {
 	case overlaySearch:
 		return []hint{{k.Enter.Help().Key, "search"}, {k.Esc.Help().Key, "cancel"}}
 	case overlayTheme:
-		return []hint{{"↑/↓", "preview"}, {k.Enter.Help().Key, "keep"}, {k.Esc.Help().Key, "revert"}}
+		return []hint{{"↑↓/jk", "preview"}, {k.Enter.Help().Key, "keep"}, {k.Esc.Help().Key, "revert"}}
 	}
 	switch m.focus {
 	case focusLibrary, focusPlaylists:
-		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "open"}, {"1-4", "focus"},
+		return []hint{{"↑↓/jk", "move"}, {k.Enter.Help().Key, "open"}, {"1-4/hl", "focus"},
 			{k.Search.Help().Key, "search"}, {k.Theme.Help().Key, "theme"}, {k.Help.Help().Key, "help"}}
 	case focusQueue:
-		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
+		return []hint{{"↑↓/jk", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
 			{"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}, {k.Help.Help().Key, "help"}}
 	default: // focusMain
 		top := m.stack[len(m.stack)-1]
 		switch {
 		case top.kind == mainAlbum:
-			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play from here"},
+			return []hint{{"↑↓/jk", "move"}, {k.Enter.Help().Key, "play from here"},
 				{k.Esc.Help().Key, "back"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 		case top.kind == mainSearch && top.cursor >= len(top.tracks):
 			// An album row is selected.
-			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play album"},
+			return []hint{{"↑↓/jk", "move"}, {k.Enter.Help().Key, "play album"},
 				{k.Open.Help().Key, "open album"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 		default:
-			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
+			return []hint{{"↑↓/jk", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
 				{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 		}
 	}

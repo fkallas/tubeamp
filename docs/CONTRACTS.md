@@ -387,11 +387,12 @@ The main view is a stack of frames; a frame is one of three kinds:
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 
 Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main
-view; `←`/`→` seek -5s/+5s; `space` pause; `n`/`p` next/previous track;
+view; `h`/`l` cycle panel focus backward/forward (1→2→3→4, wrapping);
+`←`/`→` seek -5s/+5s; `space` pause; `n`/`p` next/previous track;
 `+`/`=`/`-` volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
 overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 
-Per panel: `↑`/`↓` arrows move selection; `g/G` top/bottom; `enter` activates.
+Per panel: `↑`/`↓` or `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
 Library/Playlists `enter` → load (mock) tracks into main view. Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
 `A` insert-next; `o` open album (album rows only). Queue: `enter` jump-to-track,

@@ -9,14 +9,16 @@ import "github.com/charmbracelet/bubbles/key"
 // keys and the help text (key glyph + description) shown to the user.
 type KeyMap struct {
 	// Focus / navigation.
-	Focus1 key.Binding
-	Focus2 key.Binding
-	Focus3 key.Binding
-	Focus4 key.Binding
-	Up     key.Binding
-	Down   key.Binding
-	Top    key.Binding
-	Bottom key.Binding
+	Focus1    key.Binding
+	Focus2    key.Binding
+	Focus3    key.Binding
+	Focus4    key.Binding
+	FocusPrev key.Binding
+	FocusNext key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Top       key.Binding
+	Bottom    key.Binding
 
 	// Activation / playback.
 	Enter    key.Binding
@@ -49,14 +51,16 @@ type KeyMap struct {
 // Default returns the standard tubeamp key bindings.
 func Default() KeyMap {
 	return KeyMap{
-		Focus1: key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "library")),
-		Focus2: key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "playlists")),
-		Focus3: key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "queue")),
-		Focus4: key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "main")),
-		Up:     key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "up")),
-		Down:   key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "down")),
-		Top:    key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
-		Bottom: key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
+		Focus1:    key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "library")),
+		Focus2:    key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "playlists")),
+		Focus3:    key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "queue")),
+		Focus4:    key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "main")),
+		FocusPrev: key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "previous panel")),
+		FocusNext: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "next panel")),
+		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Top:       key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
+		Bottom:    key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
 
 		Enter: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "play / select")),
 		// Bubble Tea reports the space key's String() as a single space.
@@ -89,7 +93,7 @@ func Default() KeyMap {
 // group order matches HelpGroupTitles.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Focus1, k.Focus2, k.Focus3, k.Focus4, k.Up, k.Down, k.Top, k.Bottom},
+		{k.Focus1, k.Focus2, k.Focus3, k.Focus4, k.FocusPrev, k.FocusNext, k.Up, k.Down, k.Top, k.Bottom},
 		{k.Enter, k.Space, k.Next, k.Prev, k.SeekBack, k.SeekFwd, k.VolUp, k.VolDown, k.Mute},
 		{k.Append, k.InsertNext, k.Open, k.Remove, k.MoveUp, k.MoveDown, k.ClearQueue},
 		{k.Search, k.Theme, k.Help, k.Quit, k.Esc},

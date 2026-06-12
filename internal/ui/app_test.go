@@ -72,6 +72,42 @@ func TestFocusMovement(t *testing.T) {
 	}
 }
 
+func TestFocusCycleHL(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	// l cycles forward through 1→2→3→4 and wraps back to 1.
+	for _, want := range []string{"Playlists", "Queue", "Main", "Library"} {
+		m = send(m, runes("l"))
+		if got := m.FocusedPanel(); got != want {
+			t.Fatalf("after 'l' focus = %q, want %q", got, want)
+		}
+	}
+	// h cycles backward and wraps from Library to Main.
+	for _, want := range []string{"Main", "Queue", "Playlists", "Library"} {
+		m = send(m, runes("h"))
+		if got := m.FocusedPanel(); got != want {
+			t.Fatalf("after 'h' focus = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestCursorMovesWithJK(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = send(m, runes("4")) // focus main view (mock Liked Songs list)
+	if got := m.FocusedPanel(); got != "Main" {
+		t.Fatalf("focus = %q, want Main", got)
+	}
+	top := func() int { return m.stack[len(m.stack)-1].cursor }
+	start := top()
+	m = send(m, runes("j"))
+	if got := top(); got != start+1 {
+		t.Errorf("after 'j' cursor = %d, want %d", got, start+1)
+	}
+	m = send(m, runes("k"))
+	if got := top(); got != start {
+		t.Errorf("after 'k' cursor = %d, want %d", got, start)
+	}
+}
+
 func TestHelpOverlayOpensAndCloses(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	m = send(m, runes("?"))
