@@ -313,6 +313,23 @@ func (c *Client) Lyrics(ctx context.Context, videoID string) (string, error) {
 	return text, nil
 }
 
+// Account reports the signed-in account's display name, satisfying the library
+// provider seam the UI uses for its one-shot startup sign-in check. It is a thin
+// wrapper over AccountInfo: a signed-in session yields its name, a logged-out
+// session yields "" (both with a nil error), and a transport/HTTP failure is
+// returned as an error. This lets a cookie *ytm.Client serve as the UI's library
+// source interchangeably with the OAuth-backed *ytdata.Client.
+func (c *Client) Account(ctx context.Context) (string, error) {
+	name, signedIn, err := c.AccountInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !signedIn {
+		return "", nil
+	}
+	return name, nil
+}
+
 // AccountInfo queries the InnerTube account menu (the account/account_menu
 // endpoint) and reports the signed-in account. signedIn is true when YouTube
 // returns the signed-in menu — an activeAccountHeaderRenderer — and name is its

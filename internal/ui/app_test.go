@@ -23,8 +23,50 @@ import (
 // given size. It touches neither the real HOME nor the network.
 func newTestModel(t *testing.T, w, h int) Model {
 	t.Helper()
-	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue(), nil)
 	return send(m, tea.WindowSizeMsg{Width: w, Height: h})
+}
+
+// fakeLibrary is an in-memory libraryProvider for tests: it records the calls it
+// receives and returns canned data, so the Library/Playlists wiring can be
+// exercised without any network. A nil error field returns the canned slice.
+type fakeLibrary struct {
+	name      string
+	playlists []model.Playlist
+	liked     []model.Track
+	tracks    map[string][]model.Track // by playlist id
+
+	accountErr  error
+	playlistErr error
+	likedErr    error
+	tracksErr   error
+
+	accountCalls   int
+	playlistCalls  int
+	likedCalls     int
+	playlistID     string // last id passed to PlaylistTracks
+	playlistTracks int
+}
+
+func (f *fakeLibrary) Account(context.Context) (string, error) {
+	f.accountCalls++
+	return f.name, f.accountErr
+}
+
+func (f *fakeLibrary) LibraryPlaylists(context.Context) ([]model.Playlist, error) {
+	f.playlistCalls++
+	return f.playlists, f.playlistErr
+}
+
+func (f *fakeLibrary) LikedSongs(context.Context) ([]model.Track, error) {
+	f.likedCalls++
+	return f.liked, f.likedErr
+}
+
+func (f *fakeLibrary) PlaylistTracks(_ context.Context, id string) ([]model.Track, error) {
+	f.playlistTracks++
+	f.playlistID = id
+	return f.tracks[id], f.tracksErr
 }
 
 // send dispatches one message and returns the updated model.
@@ -947,7 +989,7 @@ func TestDerivedAlbumsOrderedFirstAndDeduped(t *testing.T) {
 // renders without an empty "()" segment and that opening it (GetAlbum) fills the
 // year on the album view — the fallback must not regress the album flow.
 func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	derived := model.Album{BrowseID: "MPREb_derived", Title: "Derived Album", Artists: []string{"Some Artist"}, ThumbURL: "https://lh3.googleusercontent.com/x"}
@@ -987,7 +1029,7 @@ func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
 // locally — a mock ID like "focus" must never reach a real PlaylistTracks
 // browse (browseId "VLfocus").
 func TestPlaylistEnterWhilePanelStillMockPlaysMock(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	if !m.canLoadLibrary() {
@@ -1009,7 +1051,7 @@ func TestPlaylistEnterWhilePanelStillMockPlaysMock(t *testing.T) {
 // TestPlaylistEnterRealAfterPanelFilled asserts the real browse path engages
 // only once the panel holds real playlists.
 func TestPlaylistEnterRealAfterPanelFilled(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	m.plGen = 1
@@ -1033,7 +1075,7 @@ func TestPlaylistEnterRealAfterPanelFilled(t *testing.T) {
 // behavior: with a client present but the session resolved anonymous, opening a
 // (mock) playlist loads the mock tracks AND toasts the sign-in hint.
 func TestPlaylistEnterAnonymousToastsSignInHint(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{signedIn: false})
 
@@ -1052,7 +1094,7 @@ func TestPlaylistEnterAnonymousToastsSignInHint(t *testing.T) {
 // Songs load in flight when the user issues a new search must be dropped — its
 // late result may not setMain over (and so destroy) the search-results frame.
 func TestSearchInvalidatesPendingLibraryLoad(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 
@@ -1390,7 +1432,7 @@ func TestAlbumViewSurvivesLateLibraryLoad(t *testing.T) {
 // TestOpenAlbumFromSongRow: 'o' on a song row carrying an AlbumID fires a
 // GetAlbum and, when the result arrives, pushes the album view.
 func TestOpenAlbumFromSongRow(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	// A plain track list (e.g. Liked Songs) whose song carries its album id.
@@ -1422,7 +1464,7 @@ func TestOpenAlbumFromSongRow(t *testing.T) {
 // TestOpenAlbumFromSongRowNoAlbumID: 'o' on a song with no AlbumID toasts and
 // pushes nothing.
 func TestOpenAlbumFromSongRowNoAlbumID(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	m.setMain("Liked Songs", []model.Track{
@@ -1446,7 +1488,7 @@ func TestOpenAlbumFromSongRowNoAlbumID(t *testing.T) {
 
 // TestOpenAlbumFromQueueRow: 'o' on a queue row opens the song's album too.
 func TestOpenAlbumFromQueueRow(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	m.q.Set([]model.Track{
@@ -1472,7 +1514,7 @@ func TestOpenAlbumFromQueueRow(t *testing.T) {
 // TestOpenAlbumFromAlbumRowStillWorks: 'o' on a search-results album row keeps
 // opening that album by its own browseId (unchanged behavior).
 func TestOpenAlbumFromAlbumRowStillWorks(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	row := model.Album{BrowseID: "MPREb_row", Title: "Row Album", Artists: []string{"A"}}
@@ -1496,5 +1538,184 @@ func TestOpenAlbumFromAlbumRowStillWorks(t *testing.T) {
 	m = send(m, albumLoadMsg{gen: m.albumGen, open: true, title: "Row Album", album: full, tracks: ts})
 	if len(m.stack) != depth+1 || m.stack[len(m.stack)-1].kind != mainAlbum {
 		t.Errorf("album-row 'o' did not push album view: depth %d -> %d", depth, len(m.stack))
+	}
+}
+
+// ── libraryProvider wiring (OAuth Data API / cookie library source) ──────────
+
+// newLibModel builds a model whose library source is lib (a fakeLibrary in
+// tests). The InnerTube client (search/playback) is a harmless anonymous client;
+// neither touches the network.
+func newLibModel(t *testing.T, lib libraryProvider) Model {
+	t.Helper()
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), lib)
+	return send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+}
+
+// TestLibProviderAccountFillsIndicator asserts the startup sign-in check reads
+// the channel name from lib.Account and renders it as "● <name>".
+func TestLibProviderAccountFillsIndicator(t *testing.T) {
+	f := &fakeLibrary{name: "Ada Lovelace"}
+	m := newLibModel(t, f)
+
+	// The Cmd Init fires resolves to this accountInfoMsg via lib.Account.
+	m = send(m, accountInfoCmd(f)())
+
+	if f.accountCalls != 1 {
+		t.Errorf("lib.Account called %d times, want 1", f.accountCalls)
+	}
+	if !m.authChecked || !m.authSignedIn || m.authName != "Ada Lovelace" {
+		t.Fatalf("indicator state: checked=%v signedIn=%v name=%q", m.authChecked, m.authSignedIn, m.authName)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "● Ada Lovelace") {
+		t.Errorf("view missing signed-in indicator from lib.Account:\n%s", v)
+	}
+}
+
+// TestLibProviderPlaylistsPanelFillsOnStartup asserts a signed-in startup check
+// fires LibraryPlaylists against the library source and fills the Playlists panel.
+func TestLibProviderPlaylistsPanelFillsOnStartup(t *testing.T) {
+	f := &fakeLibrary{
+		name:      "Ada",
+		playlists: []model.Playlist{{ID: "PLreal", Title: "Road Mix", TrackCount: 9}},
+	}
+	m := newLibModel(t, f)
+
+	// The signed-in account resolution triggers the one-shot playlists fill Cmd…
+	mm, cmd := m.Update(accountInfoMsg{name: "Ada", signedIn: true})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("signed-in account did not trigger a LibraryPlaylists fill")
+	}
+	// …run it (it calls the fake) and feed the result back.
+	m = send(m, cmd())
+
+	if f.playlistCalls != 1 {
+		t.Errorf("lib.LibraryPlaylists called %d times, want 1", f.playlistCalls)
+	}
+	if !m.playlistsReal || len(m.playlists) != 1 || m.playlists[0].Title != "Road Mix" {
+		t.Fatalf("panel not filled from lib: real=%v playlists=%+v", m.playlistsReal, m.playlists)
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "Road Mix") || strings.Contains(v, "Focus Deep Work") {
+		t.Errorf("Playlists panel did not replace mock with the real fill:\n%s", v)
+	}
+}
+
+// TestLibProviderLikedSongsLoadsIntoMainView asserts Library→"Liked Songs" enter
+// loads lib.LikedSongs into the focused main view.
+func TestLibProviderLikedSongsLoadsIntoMainView(t *testing.T) {
+	f := &fakeLibrary{
+		liked: []model.Track{{VideoID: "v1", Title: "Liked One"}, {VideoID: "v2", Title: "Liked Two"}},
+	}
+	m := newLibModel(t, f)
+	m = send(m, accountInfoMsg{name: "Ada", signedIn: true})
+
+	// Library is the default focus; the cursor sits on "Liked Songs".
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on Liked Songs dispatched no LikedSongs command")
+	}
+	m = send(m, cmd())
+
+	if f.likedCalls != 1 {
+		t.Errorf("lib.LikedSongs called %d times, want 1", f.likedCalls)
+	}
+	if m.FocusedPanel() != "Main" {
+		t.Fatalf("Liked Songs load did not focus the main view; focus=%q", m.FocusedPanel())
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Liked Songs" || len(top.tracks) != 2 {
+		t.Fatalf("main frame = {title:%q tracks:%d}, want {Liked Songs, 2}", top.title, len(top.tracks))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Liked One") {
+		t.Errorf("main view missing the loaded liked song")
+	}
+}
+
+// TestLibProviderOpenPlaylistCallsPlaylistTracks asserts opening a real playlist
+// row calls lib.PlaylistTracks with the playlist id and shows its tracks.
+func TestLibProviderOpenPlaylistCallsPlaylistTracks(t *testing.T) {
+	f := &fakeLibrary{
+		playlists: []model.Playlist{{ID: "PLroad", Title: "Road Mix"}},
+		tracks:    map[string][]model.Track{"PLroad": {{VideoID: "v9", Title: "Open Road"}}},
+	}
+	m := newLibModel(t, f)
+	m = send(m, accountInfoMsg{name: "Ada", signedIn: true})
+
+	// Fill the panel with the real playlist, then open it.
+	m.plGen = 1
+	m = send(m, libPlaylistsMsg{gen: 1, playlists: f.playlists})
+	m = send(m, runes("2")) // focus Playlists
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on a real playlist row dispatched no PlaylistTracks command")
+	}
+	m = send(m, cmd())
+
+	if f.playlistTracks != 1 || f.playlistID != "PLroad" {
+		t.Errorf("PlaylistTracks calls=%d id=%q, want 1 and PLroad", f.playlistTracks, f.playlistID)
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Road Mix" || len(top.tracks) != 1 {
+		t.Fatalf("main frame = {title:%q tracks:%d}, want {Road Mix, 1}", top.title, len(top.tracks))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Open Road") {
+		t.Errorf("main view missing the loaded playlist track")
+	}
+}
+
+// TestNilLibKeepsMockAndSignInHint asserts that with no library source (nil
+// interface) but a search client present, "Liked Songs" enter keeps the mock
+// data and toasts the sign-in hint — and canLoadLibrary stays false.
+func TestNilLibKeepsMockAndSignInHint(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	if m.canLoadLibrary() {
+		t.Fatal("canLoadLibrary should be false with a nil library source")
+	}
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // enter on Liked Songs
+	m = mm.(Model)
+	if cmd != nil {
+		t.Error("enter on Liked Songs with no library source dispatched a command")
+	}
+	if !strings.Contains(m.status, "sign in to load your library") {
+		t.Errorf("status = %q, want the sign-in hint", m.status)
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Liked Songs" || len(top.tracks) == 0 {
+		t.Errorf("nil-lib Liked Songs enter did not open mock tracks: title=%q tracks=%d", top.title, len(top.tracks))
+	}
+}
+
+// TestDataAPITrackRendersWithoutAlbumOrDuration asserts a Data-API-style track
+// (Album="" and Duration=0) renders in both the main track table and the player
+// bar without a panic or a garbage time — the unknown total shows "--:--".
+func TestDataAPITrackRendersWithoutAlbumOrDuration(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	bare := model.Track{VideoID: "v0", Title: "No Album No Duration", Artists: []string{"Some Artist"}}
+
+	// Main-view track table.
+	m.setMain("Liked Songs", []model.Track{bare})
+	m.setFocus(focusMain)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "No Album No Duration") {
+		t.Errorf("main view missing the bare track title:\n%s", v)
+	}
+	if strings.Contains(v, "-1:") || strings.Contains(v, ":-") {
+		t.Errorf("main view rendered a garbage duration:\n%s", v)
+	}
+
+	// Player bar: a now-playing bare track shows "--:--" for the unknown total.
+	m.nowPlaying = bare
+	m.hasNow = true
+	m.timePos = 0
+	m.duration = 0
+	pv := ansi.Strip(m.View())
+	if !strings.Contains(pv, "--:--") {
+		t.Errorf("player bar did not render --:-- for an unknown duration:\n%s", pv)
 	}
 }

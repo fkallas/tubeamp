@@ -87,7 +87,12 @@ func artRowsOf(s string) []string {
 // dot at the playhead (Accent before it, Muted after), and total time.
 func progressLine(th *theme.Theme, elapsed, total float64, w int) string {
 	el := FormatSeconds(elapsed)
+	// An unknown total (Data-API tracks carry no duration; mpv fills it in once
+	// the file loads) renders as "--:--" rather than a misleading "0:00".
 	tot := FormatSeconds(total)
+	if total <= 0 {
+		tot = "--:--"
+	}
 	barW := w - lipgloss.Width(el) - lipgloss.Width(tot) - 2
 	if barW < 1 {
 		return th.Muted().Render(Clip(el+" / "+tot, w))

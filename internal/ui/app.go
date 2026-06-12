@@ -99,12 +99,26 @@ type mainContent struct {
 	cursorMoved bool
 }
 
+// libraryProvider is the seam through which the UI reads the user's real library
+// (sign-in name, playlists, liked songs, a playlist's tracks). Both the
+// OAuth-backed *ytdata.Client (durable, official Data API) and a cookie
+// *ytm.Client satisfy it, so cmd/tubeamp can pick the source without the UI
+// caring which. A nil interface means "no library source" → mock data + sign-in
+// hint. Search, album browsing and playback resolution stay on *ytm.Client (m.c).
+type libraryProvider interface {
+	Account(context.Context) (string, error)
+	LibraryPlaylists(context.Context) ([]model.Playlist, error)
+	LikedSongs(context.Context) ([]model.Track, error)
+	PlaylistTracks(context.Context, string) ([]model.Track, error)
+}
+
 // Model is the root tea.Model for tubeamp.
 type Model struct {
 	cfg *config.Config
 	th  *theme.Theme
-	p   *player.Player // may be nil => playback disabled
-	c   *ytm.Client    // may be nil => search disabled
+	p   *player.Player  // may be nil => playback disabled
+	c   *ytm.Client     // may be nil => search disabled
+	lib libraryProvider // may be nil => no real library (mock data + sign-in hint)
 	q   *core.Queue
 
 	keys keymap.KeyMap
@@ -232,14 +246,18 @@ type Model struct {
 	logoTicking bool
 }
 
-// New constructs the root model. p (player) and c (ytm client) may each be nil,
-// in which case the affected features are disabled with a status-line notice.
-func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue) Model {
+// New constructs the root model. p (player), c (ytm client) and lib (library
+// source) may each be nil, in which case the affected features are disabled (a
+// status-line notice for player/search; mock data + sign-in hint for the
+// library). lib must be an untyped nil when there is no library source — a typed
+// nil pointer would make the m.lib != nil guard wrongly fire.
+func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider) Model {
 	m := Model{
 		cfg:              cfg,
 		th:               th,
 		p:                p,
 		c:                c,
+		lib:              lib,
 		q:                q,
 		keys:             keymap.Default(),
 		focus:            focusLibrary,
@@ -316,10 +334,11 @@ func (m Model) Init() tea.Cmd {
 		m.lyricsCache[m.nowPlaying.VideoID] = lyricResult{status: lyricLoading}
 		cmds = append(cmds, fetchLyricsCmd(m.c, m.nowPlaying))
 	}
-	// One-shot sign-in check: surfaces the account name (or a stale-cookie
-	// warning) in the logo/status area. No re-check is issued.
-	if m.c != nil {
-		cmds = append(cmds, accountInfoCmd(m.c))
+	// One-shot sign-in check against the library source: surfaces the account
+	// name (or a stale-cookie / not-signed-in indicator) in the logo/status area.
+	// No re-check is issued. With no library source the indicator stays blank.
+	if m.lib != nil {
+		cmds = append(cmds, accountInfoCmd(m.lib))
 	}
 	// Drive the wordmark colour-cycle animation.
 	cmds = append(cmds, logoTickCmd())
@@ -416,9 +435,10 @@ type statusMsg struct {
 	isErr bool
 }
 
-// accountInfoMsg carries the one-shot AccountInfo result. signedIn + name come
-// straight from the InnerTube account menu; err is set when the check could not
-// run (network down), in which case the indicator stays unresolved.
+// accountInfoMsg carries the one-shot sign-in check result from the library
+// source (lib.Account): name is the account/channel name and signedIn is whether
+// it resolved to one; err is set when the check could not run (network down, or a
+// revoked OAuth token), in which case the indicator stays unresolved.
 type accountInfoMsg struct {
 	name     string
 	signedIn bool
@@ -559,15 +579,17 @@ func artFetchCmd(t model.Track) tea.Cmd {
 	}
 }
 
-// accountInfoCmd runs the one-shot sign-in check. It is bounded by a short
-// timeout so a dead network resolves quickly into an err (indicator stays
-// unresolved) rather than hanging.
-func accountInfoCmd(c *ytm.Client) tea.Cmd {
+// accountInfoCmd runs the one-shot sign-in check against the library source. It
+// is bounded by a short timeout so a dead network resolves quickly into an err
+// (indicator stays unresolved) rather than hanging. signedIn is derived from a
+// non-empty account name (lib.Account returns the channel/account name, or "" for
+// a logged-out session).
+func accountInfoCmd(lib libraryProvider) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		name, signedIn, err := c.AccountInfo(ctx)
-		return accountInfoMsg{name: name, signedIn: signedIn, err: err}
+		name, err := lib.Account(ctx)
+		return accountInfoMsg{name: name, signedIn: name != "", err: err}
 	}
 }
 
@@ -614,33 +636,33 @@ func (m *Model) maybeReimportCmd() tea.Cmd {
 
 // libraryPlaylistsCmd fetches the signed-in user's playlists for the Playlists
 // panel. plGen tags the result so a stale one is dropped.
-func libraryPlaylistsCmd(c *ytm.Client, gen int) tea.Cmd {
+func libraryPlaylistsCmd(lib libraryProvider, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		pls, err := c.LibraryPlaylists(ctx)
+		pls, err := lib.LibraryPlaylists(ctx)
 		return libPlaylistsMsg{gen: gen, playlists: pls, err: err}
 	}
 }
 
 // likedSongsCmd fetches the Liked Songs auto-playlist into the main view; title
 // is echoed back so the result handler can title the frame.
-func likedSongsCmd(c *ytm.Client, title string, gen int) tea.Cmd {
+func likedSongsCmd(lib libraryProvider, title string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		ts, err := c.LikedSongs(ctx)
+		ts, err := lib.LikedSongs(ctx)
 		return libTracksMsg{gen: gen, title: title, tracks: ts, err: err}
 	}
 }
 
 // playlistTracksCmd fetches a playlist's tracks into the main view, titled by
 // the playlist name.
-func playlistTracksCmd(c *ytm.Client, id, title string, gen int) tea.Cmd {
+func playlistTracksCmd(lib libraryProvider, id, title string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		ts, err := c.PlaylistTracks(ctx, id)
+		ts, err := lib.PlaylistTracks(ctx, id)
 		return libTracksMsg{gen: gen, title: title, tracks: ts, err: err}
 	}
 }
@@ -897,9 +919,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Now that we know the session is live, fill the Playlists panel with the
 		// user's real playlists. An anonymous session keeps the mock data — but if
 		// we remember a browser to re-import from, try a one-shot refresh first.
-		if msg.signedIn && m.c != nil {
+		if msg.signedIn && m.lib != nil {
 			m.plGen++
-			return m, libraryPlaylistsCmd(m.c, m.plGen)
+			return m, libraryPlaylistsCmd(m.lib, m.plGen)
 		}
 		return m, m.maybeReimportCmd()
 
@@ -959,7 +981,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cookies instead of the discarded stale jar. Mirroring the startup
 		// accountInfoMsg handler, a probe error leaves the resolved state alone
 		// rather than claiming anonymous or signed-in.
+		oldC := m.c
 		m.c = msg.client
+		// When the library was cookie-backed (lib was this same InnerTube client),
+		// repoint it at the refreshed client too so later library loads use the new
+		// cookies. An OAuth (ytdata) library source is left untouched.
+		if cookieLib, ok := m.lib.(*ytm.Client); ok && cookieLib == oldC {
+			m.lib = msg.client
+		}
 		m.hasAuth = true
 		if msg.err != nil {
 			m.setStatus("re-imported from " + msg.browser + " — could not confirm sign-in")
@@ -969,9 +998,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authSignedIn = true
 		m.authName = msg.name
 		m.setStatus("session refreshed from " + msg.browser)
-		if m.c != nil {
+		if m.lib != nil {
 			m.plGen++
-			return m, libraryPlaylistsCmd(m.c, m.plGen)
+			return m, libraryPlaylistsCmd(m.lib, m.plGen)
 		}
 		return m, nil
 
@@ -1411,10 +1440,11 @@ func (m *Model) handleEnter() tea.Cmd {
 				m.libGen++
 				m.setStatus("loading Liked Songs…")
 				m.setFocus(focusMain)
-				return likedSongsCmd(m.c, name, m.libGen)
+				return likedSongsCmd(m.lib, name, m.libGen)
 			}
 			if name == "Liked Songs" && m.c != nil {
-				// A client is present but the session is anonymous.
+				// No library source, but a (search) client is present: keep mock
+				// data and point the user at signing in.
 				m.setMain(name, mockLibraryTracks(name))
 				m.setFocus(focusMain)
 				m.setError("sign in to load your library — see README")
@@ -1433,7 +1463,7 @@ func (m *Model) handleEnter() tea.Cmd {
 				m.libGen++
 				m.setStatus("loading " + pl.Title + "…")
 				m.setFocus(focusMain)
-				return playlistTracksCmd(m.c, pl.ID, pl.Title, m.libGen)
+				return playlistTracksCmd(m.lib, pl.ID, pl.Title, m.libGen)
 			}
 			if m.playlistsReal {
 				// Real playlists but the session has since resolved anonymous
@@ -1912,10 +1942,12 @@ func (m *Model) setStatus(s string) { m.status, m.statusErr = s, false }
 func (m *Model) setError(s string)  { m.status, m.statusErr = s, true }
 
 // canLoadLibrary reports whether real library/playlist browses should run: a
-// client is present and the one-shot sign-in check confirmed a live session.
-// Anonymous (or unresolved) sessions fall back to mock data instead.
+// library source is configured (OAuth Data API client, or a cookie InnerTube
+// client). With no source (a nil interface) the UI falls back to mock data plus
+// a sign-in hint. A configured-but-stale source still attempts the browse and
+// degrades on ErrNotSignedIn (see the libPlaylistsMsg/libTracksMsg handlers).
 func (m Model) canLoadLibrary() bool {
-	return m.c != nil && m.authSignedIn
+	return m.lib != nil
 }
 
 // downgradeAuth flips the resolved sign-in state to anonymous: a library browse

@@ -44,6 +44,23 @@ func oauthTokenPath() string {
 	return filepath.Join(config.DataDir(), "oauth.json")
 }
 
+// oauthLibrary builds the durable OAuth-backed library client (the official
+// YouTube Data API) when OAuth client credentials are configured AND a stored
+// token loads. It returns a typed nil when OAuth is not configured or no token is
+// present, so the caller can fall back to a cookie library (or none). The
+// returned client persists refreshed tokens back to oauth.json.
+func oauthLibrary(cfg *config.Config) *ytdata.Client {
+	if cfg.OAuthClientID == "" || cfg.OAuthClientSecret == "" {
+		return nil
+	}
+	path := oauthTokenPath()
+	tok, err := ytm.LoadOAuthToken(path)
+	if err != nil {
+		return nil
+	}
+	return ytdata.NewClient(tok, oauthCredsFrom(cfg), path)
+}
+
 // oauthCredsFrom builds the OAuth client credentials from config.
 func oauthCredsFrom(cfg *config.Config) ytm.OAuthCreds {
 	return ytm.OAuthCreds{ClientID: cfg.OAuthClientID, ClientSecret: cfg.OAuthClientSecret}

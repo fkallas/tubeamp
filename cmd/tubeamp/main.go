@@ -142,7 +142,23 @@ func run(cfg *config.Config, themeOverride string) error {
 
 	q := core.NewQueue()
 
-	m := ui.New(cfg, th, p, client, q)
+	oauthLib := oauthLibrary(cfg)
+
+	// Library source selection. OAuth (the official YouTube Data API) is the
+	// durable library source and is preferred when configured + a token is
+	// stored; otherwise a present cookie auth file lets the InnerTube client
+	// double as the library source. With neither, lib stays an untyped nil so the
+	// UI shows mock data + a sign-in hint (passing a typed-nil pointer would
+	// wrongly trip the UI's lib != nil guard). Search/playback always use client.
+	var m ui.Model
+	switch {
+	case oauthLib != nil:
+		m = ui.New(cfg, th, p, client, q, oauthLib)
+	case client.Authenticated():
+		m = ui.New(cfg, th, p, client, q, client)
+	default:
+		m = ui.New(cfg, th, p, client, q, nil)
+	}
 	prog := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := prog.Run(); err != nil {
 		return fmt.Errorf("running ui: %w", err)
@@ -150,12 +166,13 @@ func run(cfg *config.Config, themeOverride string) error {
 	return nil
 }
 
-// buildClient constructs the InnerTube client for the TUI. InnerTube does not
-// accept OAuth bearer tokens (Google's youtubei API rejects them), so this
-// client is cookie-authenticated when an auth file is present, else anonymous —
-// never OAuth. OAuth instead powers the Data API library client (see commit
-// wiring in run/ui). A missing/unreadable cookie file yields an unauthenticated
-// client (search still works).
+// buildClient constructs the InnerTube client for the TUI (search + playback
+// resolution). InnerTube does not accept OAuth bearer tokens (Google's youtubei
+// API rejects them), so this client is cookie-authenticated when an auth file is
+// present, else anonymous — never OAuth. OAuth instead powers the Data API
+// library client (oauthLibrary); run() selects the library source separately. A
+// missing/unreadable cookie file yields an unauthenticated client (search still
+// works).
 func buildClient(cfg *config.Config) *ytm.Client {
 	var auth *ytm.Auth
 	if a, aerr := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth")); aerr == nil {

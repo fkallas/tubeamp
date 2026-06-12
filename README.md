@@ -25,9 +25,14 @@ renderer work end to end. The YT Music API client wires unauthenticated
 song/album search and album browsing into the search view. For a **signed-in**
 session it also loads your real library: the Playlists panel fills with your
 playlists on startup, Library → "Liked Songs" loads your Liked Songs, and opening
-a playlist loads its tracks (first page, ~100 tracks each; radio not yet). An
+a playlist loads its tracks (first page, ~100 tracks each; radio not yet). The
+library is read through the official **YouTube Data API** when you sign in with
+OAuth (durable, no cookie rotation), or through cookies when you sign in that
+way; search and playback always use the cookie/anonymous InnerTube client. An
 **anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
 remaining Library sections (Albums/Artists/Songs/History) are still mock.
+Library tracks loaded over the Data API show no album column or duration (the
+Data API does not expose them; the duration fills in from mpv once a track plays).
 
 Time-synced lyrics are surfaced in a panel below the main view while a track
 plays: LRC fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube
@@ -200,7 +205,9 @@ background and, once you approve, saves the token and prints `signed in as
 It **lasts months and refreshes itself automatically** — tubeamp swaps in a new
 access token whenever the old one expires, with no action from you. On startup,
 if `oauth.json` exists and the client credentials are configured, tubeamp uses
-OAuth in preference to the cookie auth file. `-logout` just deletes `oauth.json`.
+OAuth as the **library** source (the official YouTube Data API), in preference to
+the cookie auth file. Search and playback still go through the cookie/anonymous
+InnerTube client either way. `-logout` just deletes `oauth.json`.
 
 If Google ever revokes the token (you removed the app's access, or the consent
 screen's test-mode tokens expired), the TUI says **`sign-in expired — run
@@ -209,14 +216,18 @@ tubeamp -login`** on the status line and the header indicator shows
 The browser cookie auto-refresh below never kicks in for an OAuth session.
 
 What OAuth unlocks is durable **library** access — your Liked Songs and
-playlists — without the cookie-rotation headache below. A couple of caveats:
+playlists — without the cookie-rotation headache below. It powers the library
+*only*, through the official YouTube **Data API v3**: search, album browsing,
+lyrics and playback resolution all keep using the cookie/anonymous InnerTube
+client (Google's private youtubei API rejects OAuth bearer tokens, so OAuth can
+never drive it). A couple of caveats:
 
 - OAuth does **not** change album-search ranking. The thin album-search results
   for some queries are an InnerTube quirk, already worked around by the
   song-derived album fallback; signing in (either way) does not affect it.
-- OAuth talks to YouTube as a TV/limited-input client, so its API surface differs
-  slightly from the web client — a few web-only fields may be absent — but search,
-  library, playlists, albums and lyrics all work.
+- The Data API does not expose a track's album or duration, so Liked Songs /
+  playlist rows loaded over OAuth show an empty album column and a blank duration
+  in the list (the duration fills in from mpv once the track plays).
 
 ### Cookies (browser import)
 

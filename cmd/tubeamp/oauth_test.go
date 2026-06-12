@@ -146,6 +146,34 @@ func TestRunLogin_confirmError(t *testing.T) {
 	}
 }
 
+// TestOAuthLibrary selects the durable OAuth library source only when client
+// credentials are configured AND a token is stored — otherwise nil, so run() can
+// fall back to the cookie library (or none). No network is touched.
+func TestOAuthLibrary(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	// No creds, no token => no OAuth library.
+	if lib := oauthLibrary(config.Default()); lib != nil {
+		t.Errorf("oauthLibrary with no creds = %v, want nil", lib)
+	}
+
+	// Creds set but no token file => still nil.
+	if lib := oauthLibrary(cfgWithCreds()); lib != nil {
+		t.Errorf("oauthLibrary with creds but no token = %v, want nil", lib)
+	}
+
+	// Creds + a stored token => a Data API client.
+	tok := &ytm.OAuthToken{AccessToken: "acc", RefreshToken: "ref", TokenType: "Bearer", ExpiresAt: 1 << 40}
+	if err := tok.Save(oauthTokenPath()); err != nil {
+		t.Fatal(err)
+	}
+	if lib := oauthLibrary(cfgWithCreds()); lib == nil {
+		t.Error("oauthLibrary with creds + token = nil, want a Data API client")
+	}
+}
+
 // TestRunLogout removes an existing token and reports a missing one cleanly.
 func TestRunLogout(t *testing.T) {
 	tmp := t.TempDir()

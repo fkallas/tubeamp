@@ -77,8 +77,11 @@ OAuth token storage: `DataDir()/oauth.json` — JSON `{access_token, refresh_tok
 expires_at (unix secs), expires_in, token_type, scope}`, written 0600 via the
 shared atomic writer. Field names match ytmusicapi's oauth.json (interoperable).
 When `oauth_client_id`/`oauth_client_secret` are set and `oauth.json` exists, the
-TUI builds the InnerTube client in OAuth mode, preferred over the cookie `auth`
-file; otherwise cookie auth is used (unchanged).
+TUI uses OAuth as the **library** source (the official YouTube Data API via
+`internal/ytdata`), preferred over the cookie `auth` file; otherwise a present
+cookie `auth` file backs the library, else there is none (mock data). The
+InnerTube client (search + playback resolution) stays cookie/anonymous either
+way — it never uses OAuth (youtubei rejects bearer tokens).
 
 ```go
 const (
@@ -668,9 +671,25 @@ process check is gated behind `TUBEAMP_LIVE_PROC=1` (optional
 
 ```go
 // package ui
-func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue) Model
+func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider) Model
 // Model implements tea.Model (v1). Run with tea.NewProgram(m, tea.WithAltScreen()).
 // p and c may each be nil => degraded mode (status-line notice instead of crash).
+// lib is the library SOURCE; pass an untyped nil when there is none (a typed-nil
+// pointer would wrongly trip the m.lib != nil guard).
+
+// libraryProvider is the unexported seam the UI reads the user's library through
+// (sign-in name + playlists + liked songs + a playlist's tracks). Both the
+// OAuth-backed *ytdata.Client and a cookie *ytm.Client satisfy it as-is (the
+// ytm.Client.Account wrapper maps AccountInfo to (name, err)). Search, album
+// browsing and playback stay on m.c (*ytm.Client, InnerTube). canLoadLibrary() is
+// simply `m.lib != nil`; a configured-but-stale source still attempts the browse
+// and degrades on ErrNotSignedIn.
+type libraryProvider interface {
+    Account(context.Context) (string, error)
+    LibraryPlaylists(context.Context) ([]model.Playlist, error)
+    LikedSongs(context.Context) ([]model.Track, error)
+    PlaylistTracks(context.Context, string) ([]model.Track, error)
+}
 
 // ANSI-aware overlay compositor (compose.go). Splices an overlay box over the
 // fully-rendered app view WITHOUT blanking the rows it sits on: for each overlay
@@ -717,16 +736,19 @@ and the sign-in indicator ride the same row, right-aligned. When terminal height
 panel area reclaims that row (the panel-area floor needs that row at the shortest
 size). Colours come strictly from theme tokens/palette — no hardcoded hex.
 
-Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
-`AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently
+Sign-in indicator: when the **library source** (`m.lib`) is non-nil the model
+fires a one-shot `lib.Account` Cmd on startup (`Init`); `signedIn` is derived
+from a non-empty name. The resolved state is shown persistently
 at the right end of the wordmark header row (ANSI-aware-truncated with an
 ellipsis when a long account name would not fit), or right-aligned on the bottom
 status line when the header is hidden (truncated the same way — on either home an
 oversized indicator must clip, never widen the row past the terminal and break
-the full-width frame invariant). Signed in => "● <name>" in PlayingStyle;
-credentials that resolve anonymous => a mode-specific Muted hint — "○ anonymous
-— cookie stale? see README" in cookie mode, "○ anonymous — run tubeamp -login"
-when the client `UsingOAuth()`; no credentials => "○ not signed in" in Muted. A
+the full-width frame invariant). Signed in => "● <name>" in PlayingStyle (the
+channel name for an OAuth library, the account name for a cookie library);
+credentials that resolve anonymous => "○ anonymous — cookie stale? see README"
+in Muted when an auth file is present (`hasAuth`), else "○ not signed in". With
+no library source (`m.lib == nil`) the check never fires and the indicator stays
+blank. A
 failed check (network down) leaves the indicator blank (no retry) — EXCEPT a
 revoked OAuth session: an error chain carrying a `*ytm.OAuthError` with code
 `invalid_grant` (matched with `errors.As`, so the ytm refresh wrapping is
@@ -738,21 +760,22 @@ later returns `ErrNotSignedIn` downgrades the resolved state to anonymous (the
 cookie rotated mid-session), flipping the indicator to the stale-cookie hint.
 Tests inject the result via `accountInfoMsg`, never the network.
 
-**Stale-session auto-refresh (cookie mode ONLY).** When the resolved state is
+**Stale-session auto-refresh (cookie sessions).** When the resolved state is
 anonymous (the startup
-`AccountInfo`, or a library browse via the downgrade path) AND `cfg.AuthBrowser`
-is set AND an auth file is present (`hasAuth`) AND the client is NOT in OAuth
-mode (`UsingOAuth()` — a remembered `auth_browser` from an earlier cookie setup
-must never silently swap an OAuth Bearer client for a cookie client; a dead
-OAuth session is prompted to `tubeamp -login` via the invalid_grant path
-instead), the model fires a ONE-SHOT
+`lib.Account` check, or a library browse via the downgrade path) AND
+`cfg.AuthBrowser` is set AND an auth file is present (`hasAuth`), the model fires
+a ONE-SHOT
 re-import `Cmd` — guarded by `reimportTried` so it happens at most once per
 session (no reimport loop). The Cmd runs the injectable `reimportFn`
 (default `defaultReimport`: `auth.ImportFromBrowser(cfg.AuthBrowser)` →
 `ytm.WriteAuthFile` → `LoadAuth` → rebuild `Client` → `AccountInfo`), returning a
-`reimportMsg`. On a signed-in result the model adopts the fresh client, flips the
+`reimportMsg`. On a signed-in result the model adopts the fresh client (as `m.c`,
+and as `m.lib` too when the library was cookie-backed — `m.lib` was that same
+`*ytm.Client`; an OAuth `*ytdata.Client` library is left untouched), flips the
 indicator to signed-in, toasts `session refreshed from <browser>`, and fills the
-Playlists panel. On a failed import (no fresh client) or a CONFIRMED anonymous
+Playlists panel from `m.lib`. (A dead OAuth session is a different remedy: its
+`invalid_grant` is prompted to `tubeamp -login` via the indicator path, and an
+OAuth-only library has no cookie auth file so this re-import never fires for it.) On a failed import (no fresh client) or a CONFIRMED anonymous
 result it toasts `re-import failed — run tubeamp -auth <browser>`. When the
 import succeeded but only the confirmation probe failed (offline/timeout), the
 fresh client is still adopted — the new cookies are on disk and must serve (and
@@ -954,13 +977,17 @@ func listenPlayer(p *player.Player) tea.Cmd {
 
 ### Library & playlists (real vs mock)
 
-For a **signed-in** session (client non-nil and the one-shot `AccountInfo` check
-resolved `signedIn`), real data replaces the mock:
+All real library data is read through the `libraryProvider` seam (`m.lib`) — the
+OAuth `*ytdata.Client` (durable, official Data API: playlists + liked songs) or a
+cookie `*ytm.Client`. `canLoadLibrary()` is `m.lib != nil`. When a source is
+present, real data replaces the mock:
 
-- On that sign-in result the model fires `LibraryPlaylists` (guarded by `plGen`)
-  and replaces the Playlists panel with the user's real playlists.
-- Library "Liked Songs" `enter` → `LikedSongs` Cmd into the main view; a playlist
-  `enter` → `PlaylistTracks` into the main view titled by the playlist name —
+- On a signed-in startup result (`accountInfoMsg`, from `lib.Account`) the model
+  fires `lib.LibraryPlaylists` (guarded by `plGen`) and replaces the Playlists
+  panel with the user's real playlists.
+- Library "Liked Songs" `enter` → `lib.LikedSongs` Cmd into the main view; a
+  playlist `enter` → `lib.PlaylistTracks` into the main view titled by the
+  playlist name —
   but only once the panel actually holds real playlists: while the
   `LibraryPlaylists` fill is still in flight (or failed) the rows are mock data
   and play their mock tracks locally; a mock ID never reaches a real browse.
@@ -970,18 +997,24 @@ resolved `signedIn`), real data replaces the mock:
   ('o' is reachable mid-load, e.g. from a queue row) — is dropped, mirroring
   the search/album generation pattern).
 
-For an **anonymous** session the mock data is kept. With a client present (the
-check resolved not-signed-in), "Liked Songs"/playlist `enter` loads the mock
-tracks and toasts "sign in to load your library — see README"; with no client at
-all the mock loads silently (no hint — there is nothing to sign in to). The
-browse methods returning `ytm.ErrNotSignedIn` (matched with `errors.Is`) keep
-the mock data, toast the same hint, and downgrade the resolved sign-in state to
-anonymous (the cookie rotated mid-session), so the indicator and the library
-behavior stay consistent.
+With **no library source** (`m.lib == nil`) the mock data is kept. If a search
+client is still present (`m.c != nil`), "Liked Songs"/playlist `enter` loads the
+mock tracks and toasts "sign in to load your library — see README"; with no
+client at all the mock loads silently (no hint — there is nothing to sign in to).
+A source that browses back `ytm.ErrNotSignedIn` (matched with `errors.Is` — a
+cookie that rotated to anonymous mid-session) keeps the mock data, toasts the
+same hint, and downgrades the resolved sign-in state to anonymous, so the
+indicator and the library behavior stay consistent.
+
+Data-API tracks carry no album (`Album`/`AlbumID` == "") and no duration
+(`Duration` == 0); the track table renders an empty album column and a blank
+duration, and the player bar shows `--:--` for an unknown total (mpv fills the
+real duration in once the file loads) — never a negative/garbage time.
 
 The other Library items (Albums/Artists/Songs/History) remain mock for now.
-Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`); the real
-browses never run from tests. Mock data lives in `internal/ui/mock.go`.
+Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`), or drive
+a fake `libraryProvider`; the real browses never run from tests. Mock data lives
+in `internal/ui/mock.go`.
 
 ## cmd/tubeamp
 
@@ -1015,19 +1048,28 @@ or touch the daemon). It requires `oauth_client_id`/`oauth_client_secret` in
 config (else a clear error + one-time-setup pointer to the README, exit 1);
 `ytm.RequestDeviceCode`; prints the `verification_url` + `user_code` prominently
 and "Waiting…"; `ytm.PollToken` (bounded by the code's `expires_in`); on success
-writes `DataDir()/oauth.json` (0600) and prints `signed in as <name>` via a
-Bearer `AccountInfo` probe — handling denial/timeout/probe-error cleanly. The
-device-flow + confirm calls are stubbable package vars
-(`oauthRequestDeviceCode`/`oauthPollToken`/`oauthConfirmSignIn`). `-logout`
-deletes `oauth.json` (a missing file is reported, not an error).
+writes `DataDir()/oauth.json` (0600) and prints `signed in as <name>` via the
+Data API `ytdata.Account` probe (`oauthConfirmSignIn`) — handling
+denial/timeout/probe-error cleanly. The device-flow + confirm calls are stubbable
+package vars (`oauthRequestDeviceCode`/`oauthPollToken`/`oauthConfirmSignIn`).
+`-logout` deletes `oauth.json` (a missing file is reported, not an error).
+`oauthLibrary(cfg) *ytdata.Client` builds the TUI's durable OAuth library source
+(creds set AND `oauth.json` loads via `ytm.LoadOAuthToken`, persisting refreshed
+tokens back to `oauth.json`); it returns a typed nil otherwise so `run` falls
+back to the cookie library or none.
 
 `main.go`: parse flags; `config.Load`. With no control flag set it runs the TUI:
 `-theme <name>` override, `-version`; `theme.Load` (fall back to `theme.Default()`
 with a warning); `player.New` (attach-or-spawn; on error nil player + degraded
-notice); `buildClient(cfg)` — OAuth mode (`oauth_client_id`/`secret` set AND
-`DataDir()/oauth.json` loads) is preferred over `ytm.LoadAuth(DataDir()/auth)`,
-falling back to cookie auth then unauthenticated — then
-`client.SetAuthUser(cfg.AuthUser)`; `core.NewQueue`; `ui.New`;
+notice); `buildClient(cfg)` — the InnerTube client for search + playback, cookie
+(`ytm.LoadAuth(DataDir()/auth)`) or anonymous, **never OAuth** — then
+`client.SetAuthUser(cfg.AuthUser)`. **Two-source library selection** picks the
+`ui.New` `lib` arg: `oauthLibrary(cfg)` (a `*ytdata.Client` when
+`oauth_client_id`/`secret` are set AND `DataDir()/oauth.json` loads — the durable
+OAuth library) is preferred; else if the cookie client is `Authenticated()` the
+same `*ytm.Client` doubles as the library; else an **untyped nil** (mock data —
+the three `ui.New` calls keep the nil literal untyped so `m.lib != nil` is a true
+interface-nil check). Then `core.NewQueue`; `ui.New(cfg, th, p, client, q, lib)`;
 `tea.NewProgram(..., tea.WithAltScreen())`. On exit: `player.Close()` — a DETACH,
 so mpv keeps playing in the background.
 
