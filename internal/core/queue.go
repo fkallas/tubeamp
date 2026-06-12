@@ -184,6 +184,24 @@ func (q *Queue) Move(i, j int) {
 	}
 }
 
+// SetIndex sets the current index directly, clamping to [-1, len-1]. It is the
+// reconciliation hook the UI uses to mirror the daemon's playlist-pos (which mpv
+// advances on its own): pass -1 when playback goes idle at the end of the queue.
+// Unlike JumpTo it never sends a command — it only updates the local mirror.
+func (q *Queue) SetIndex(i int) {
+	if len(q.tracks) == 0 {
+		q.index = -1
+		return
+	}
+	if i < -1 {
+		i = -1
+	}
+	if i >= len(q.tracks) {
+		i = len(q.tracks) - 1
+	}
+	q.index = i
+}
+
 // JumpTo sets the current track to index i and returns it.
 // If i is out of range, returns (zero Track, false) and does not change the current index.
 func (q *Queue) JumpTo(i int) (model.Track, bool) {

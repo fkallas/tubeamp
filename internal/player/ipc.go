@@ -205,6 +205,13 @@ func mapEvent(r *ipcResponse) (Event, bool) {
 			if b, ok := boolData(r.Data); ok {
 				return Event{Kind: EvMute, Bool: b}, true
 			}
+		case "playlist-pos", "playlist-playing-pos":
+			// Both report the current playlist index; -1 means idle (end of
+			// queue or nothing loaded). mpv advances the playlist itself, so
+			// this is what drives the client's "now playing" index.
+			if n, ok := intData(r.Data); ok {
+				return Event{Kind: EvPlaylistPos, Int: n}, true
+			}
 		}
 	case "file-loaded":
 		return Event{Kind: EvFileLoaded}, true
@@ -236,6 +243,19 @@ func floatData(raw json.RawMessage) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+// intData decodes integer property data (e.g. playlist-pos), reporting false for
+// absent or null values. It rounds via float64 to tolerate JSON numbers.
+func intData(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return 0, false
+	}
+	return int(f), true
 }
 
 // boolData decodes boolean property data, reporting false for absent or null

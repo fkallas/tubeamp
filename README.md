@@ -9,9 +9,16 @@ number-key panel switching with arrow-key navigation. Themeable via simple YAML 
 The main view lists tracks as a table — title, artist, album, and duration —
 with the album column hidden automatically on narrow terminals.
 
+**Playback survives the TUI.** mpv runs as a persistent, detached background
+daemon that owns the playlist; the TUI is just a client that attaches to it.
+Quit the TUI and the music keeps playing — reopen it and it reattaches to the
+in-progress track. The same daemon is controllable from the command line so you
+can wire keybindings and status bars to it.
+
 ## Status
 
-Early scaffold. The TUI shell, theming, mpv playback pipeline, and pixel-art
+Early scaffold. The TUI shell, theming, persistent/detached mpv playback (with a
+playlist-backed queue, CLI control, and gapless prefetch), and the pixel-art
 renderer work end to end with mock library data; the YT Music API client is a
 skeleton (unauthenticated search wired, library/playlists/radio not yet).
 
@@ -34,7 +41,16 @@ go build ./cmd/tubeamp
 
 Keys: `1/2/3/4` jump to a panel, `↑/↓` move, `enter` plays,
 `space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `+/-` volume, `/` search,
-`T` theme picker, `?` help, `q` quit.
+`T` theme picker, `?` help, `q` quit (playback keeps running in the background).
+
+## Gapless playback
+
+The daemon runs mpv with `--prefetch-playlist=yes --gapless-audio=weak`, so mpv
+resolves and opens the **next** queue entry (through yt-dlp) slightly before the
+current track ends and transitions without a gap when the codecs line up. Because
+each entry is resolved on demand, the prefetch happens a moment before the
+hand-off rather than far ahead; expect tight, near-gapless transitions rather than
+sample-accurate ones for streamed sources.
 
 ## Themes
 

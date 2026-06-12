@@ -1,8 +1,14 @@
-// Package player is a thin wrapper around an mpv subprocess driven over its
-// JSON-IPC unix socket. It spawns mpv in idle/audio-only mode, correlates
-// request/reply traffic by request_id, and surfaces playback state changes as a
-// stream of Events. mpv resolves YouTube URLs itself via its yt-dlp hook, so
-// this package never handles raw stream URLs.
+// Package player is a thin client for a *persistent, detached* mpv process that
+// owns the playback playlist. mpv is spawned once (setsid, stdio to /dev/null,
+// the parent never waits on it), listens on a fixed JSON-IPC unix socket, and
+// keeps playing after the TUI exits. Any number of clients — the TUI or the
+// one-shot CLI control commands — attach to the same socket, drive the shared
+// mpv playlist, and detach again without disturbing playback.
+//
+// mpv resolves YouTube URLs itself via its yt-dlp hook, so this package never
+// handles raw stream URLs. The ordered, richly-typed queue is mirrored to a
+// sidecar (queue.json) on every mutation so a re-attaching client can rebuild
+// full state via Snapshot.
 package player
 
 import (
@@ -12,27 +18,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/fkallas/tubeamp/internal/config"
+	"github.com/fkallas/tubeamp/internal/model"
 )
 
-// Sentinel errors returned by command helpers.
+// Sentinel errors returned by command helpers and New.
 var (
-	// ErrClosed is returned by commands issued on a closed player (or pending
-	// when Close races an in-flight request).
+	// ErrClosed is returned by commands issued on a closed (detached) player,
+	// or pending when Close races an in-flight request.
 	ErrClosed = errors.New("player: closed")
 	// ErrTimeout is returned when mpv does not reply within commandTimeout.
 	ErrTimeout = errors.New("player: command timed out")
+	// ErrNotRunning is returned by New when Options.AttachOnly is set and no
+	// live mpv daemon is listening on the socket. CLI control paths use it to
+	// tell "daemon down" apart from other failures.
+	ErrNotRunning = errors.New("player: mpv daemon not running")
 )
 
 const (
-	// connectBudget is the total time New waits for the IPC socket to appear.
+	// connectBudget is the total time we wait for the IPC socket to appear
+	// after spawning mpv (or while waiting on another client's spawn).
 	connectBudget = 5 * time.Second
 	// connectRetry is the delay between socket dial attempts.
-	connectRetry = 100 * time.Millisecond
-	// processWait is how long Close waits for mpv to exit before killing it.
-	processWait = 2 * time.Second
+	connectRetry = 50 * time.Millisecond
 	// volumeMin and volumeMax bound SetVolume (mpv accepts 0..max-volume).
 	volumeMin = 0
 	volumeMax = 120
@@ -42,23 +56,28 @@ const (
 // defaults.
 type Options struct {
 	MPVPath    string // "" => "mpv" (resolved via PATH)
-	SocketPath string // "" => os.TempDir()/tubeamp-mpv-<pid>.sock
+	SocketPath string // "" => config.DataDir()/mpv.sock
 	YTDLFormat string // "" => "bestaudio"
-	Volume     int    // initial volume passed to mpv --volume
+	Volume     int    // initial volume passed to mpv --volume (spawn only)
+	// AttachOnly makes New attach to an existing daemon and never spawn one.
+	// When no daemon is listening it returns ErrNotRunning. CLI control
+	// commands set this so they never accidentally start a background mpv.
+	AttachOnly bool
 }
 
 // EventKind identifies which playback state an Event reports.
 type EventKind int
 
 const (
-	EvTimePos    EventKind = iota // Float seconds (current position)
-	EvDuration                    // Float seconds (track length)
-	EvPause                       // Bool (paused?)
-	EvVolume                      // Float 0-100 (mpv volume)
-	EvMute                        // Bool (muted?)
-	EvFileLoaded                  // a new track started playing
-	EvTrackEnded                  // end-file with reason "eof"
-	EvError                       // Str message (incl. end-file reason "error")
+	EvTimePos     EventKind = iota // Float seconds (current position)
+	EvDuration                     // Float seconds (track length)
+	EvPause                        // Bool (paused?)
+	EvVolume                       // Float 0-100 (mpv volume)
+	EvMute                         // Bool (muted?)
+	EvFileLoaded                   // a new track started playing
+	EvTrackEnded                   // end-file with reason "eof"
+	EvError                        // Str message (incl. end-file reason "error")
+	EvPlaylistPos                  // Int: current playlist index (-1 when idle)
 )
 
 // Event is a single playback state change emitted by mpv. Only the field
@@ -68,20 +87,17 @@ type Event struct {
 	Float float64
 	Bool  bool
 	Str   string
+	Int   int
 }
 
-// sockSeq disambiguates the default socket path between multiple Players in one
-// process (the pid alone collides), so New never unlinks a sibling's live socket.
-var sockSeq atomic.Int64
-
-// Player owns an mpv subprocess and its IPC connection. It is safe for
+// Player is a client attached to the persistent mpv daemon. It is safe for
 // concurrent use by multiple goroutines.
 type Player struct {
-	conn net.Conn
-	cmd  *exec.Cmd // nil when constructed from an existing conn (tests)
-	sock string    // socket file to remove on Close; "" => leave alone
-
-	procDone <-chan struct{} // closed when cmd.Wait() returns; nil when cmd == nil
+	conn      net.Conn
+	sock      string // socket path (for Quit cleanup); "" => leave alone
+	lock      string // spawn lock-file path (for Quit cleanup)
+	queuePath string // sidecar queue.json path; "" => persistence disabled
+	pid       int    // spawned mpv pid; 0 when we attached to an existing one
 
 	reqID   atomic.Int64
 	writeMu sync.Mutex // serializes writes on conn
@@ -95,14 +111,19 @@ type Player struct {
 	events     chan Event
 	readerDone chan struct{} // closed when readLoop returns
 
-	closeStateOnce sync.Once // guards close(closed): both Close and reader death may trigger it
-	finishOnce     sync.Once // guards failing pending + close(events): done exactly once
+	closeStateOnce sync.Once // guards close(closed)
+	finishOnce     sync.Once // guards failing pending + close(events)
 	closeOnce      sync.Once // guards the full Close sequence
+
+	plMu     sync.Mutex               // serializes playlist mutations + sidecar writes
+	tracksMu sync.RWMutex             // guards tracks
+	tracks   []model.Track            // in-memory ordered queue model (rich metadata)
+	urlFunc  func(model.Track) string // test seam; nil => model.Track.URL
 }
 
 // markClosed closes the closed channel exactly once. After this, new commands
 // fail fast (ErrClosed) and in-flight ones unblock. It is called both by Close
-// and by the reader goroutine when it detects mpv's death.
+// and by the reader goroutine when it detects the connection dropping.
 func (p *Player) markClosed() {
 	p.closeStateOnce.Do(func() {
 		p.mu.Lock()
@@ -113,8 +134,7 @@ func (p *Player) markClosed() {
 
 // finish fails every pending request and closes the events channel, exactly
 // once. It must only run once the reader goroutine is no longer sending on
-// events (from the reader's own exit path, or from Close after readerDone), so
-// it can never race a send onto a closed channel.
+// events, so it can never race a send onto a closed channel.
 func (p *Player) finish() {
 	p.finishOnce.Do(func() {
 		p.mu.Lock()
@@ -128,13 +148,11 @@ func (p *Player) finish() {
 }
 
 // newConn builds a Player around an already-connected IPC socket and starts the
-// reader goroutine. cmd may be nil (no child process to reap) and sock may be
-// "" (no socket file to remove). This is the seam New and tests share.
-func newConn(conn net.Conn, cmd *exec.Cmd, sock string) *Player {
+// reader goroutine. Path/pid fields are filled in by the caller (New) or left
+// zero (tests that drive a fake socket directly).
+func newConn(conn net.Conn) *Player {
 	p := &Player{
 		conn:       conn,
-		cmd:        cmd,
-		sock:       sock,
 		cmdTimeout: commandTimeout,
 		pending:    make(map[int]chan *ipcResponse),
 		closed:     make(chan struct{}),
@@ -145,10 +163,27 @@ func newConn(conn net.Conn, cmd *exec.Cmd, sock string) *Player {
 	return p
 }
 
-// New spawns mpv, connects to its IPC socket (retrying for ~5s), starts
-// observing the playback properties we report, and returns a ready Player. It
-// returns an error if the mpv binary is missing or the IPC never connects.
+// New connects the caller to the mpv daemon. It first tries to ATTACH to an
+// existing socket; if that succeeds no process is spawned. Otherwise (unless
+// AttachOnly is set) it SPAWNS a detached mpv — guarded by an O_EXCL lock file
+// so two concurrent clients never start two daemons — waits for the socket, and
+// attaches. With AttachOnly and no live daemon it returns ErrNotRunning.
 func New(o Options) (*Player, error) {
+	sock := o.SocketPath
+	if sock == "" {
+		sock = filepath.Join(config.DataDir(), "mpv.sock")
+	}
+	lock := sock + ".lock"
+	queuePath := filepath.Join(filepath.Dir(sock), "queue.json")
+
+	// Fast path: a daemon is already listening — just attach.
+	if conn, err := net.Dial("unix", sock); err == nil {
+		return finishAttach(conn, sock, lock, queuePath), nil
+	}
+	if o.AttachOnly {
+		return nil, ErrNotRunning
+	}
+
 	bin := o.MPVPath
 	if bin == "" {
 		bin = "mpv"
@@ -157,13 +192,54 @@ func New(o Options) (*Player, error) {
 	if err != nil {
 		return nil, fmt.Errorf("player: mpv binary %q not found: %w", bin, err)
 	}
-
-	sock := o.SocketPath
-	if sock == "" {
-		// pid + a per-instance sequence: the pid alone collides for two Players
-		// in one process, where New would unlink the first's live socket.
-		sock = filepath.Join(os.TempDir(), fmt.Sprintf("tubeamp-mpv-%d-%d.sock", os.Getpid(), sockSeq.Add(1)))
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		return nil, fmt.Errorf("player: create data dir: %w", err)
 	}
+	return spawnOrAttach(mpvPath, o, sock, lock, queuePath)
+}
+
+// finishAttach wraps a live connection: observe the properties we surface and
+// seed the in-memory model from the live playlist reconciled with the sidecar.
+func finishAttach(conn net.Conn, sock, lock, queuePath string) *Player {
+	p := newConn(conn)
+	p.sock, p.lock, p.queuePath = sock, lock, queuePath
+	p.observeProps()
+	p.setTracks(p.reconcileTracks())
+	return p
+}
+
+// spawnOrAttach claims the spawn lock and starts mpv, or — if another client is
+// already spawning — waits for the socket and attaches. A stale lock left by a
+// crashed daemon (no socket ever appears) is stolen once so we can recover.
+func spawnOrAttach(mpvPath string, o Options, sock, lock, queuePath string) (*Player, error) {
+	deadline := time.Now().Add(connectBudget)
+	stole := false
+	for {
+		lf, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			return spawnDetached(mpvPath, o, sock, lock, queuePath, lf)
+		}
+		// Another client holds the lock (spawning) — wait for its socket.
+		if conn, derr := net.Dial("unix", sock); derr == nil {
+			return finishAttach(conn, sock, lock, queuePath), nil
+		}
+		if time.Now().After(deadline) {
+			if stole {
+				return nil, fmt.Errorf("player: mpv did not start (stale lock %q)", lock)
+			}
+			// The lock holder vanished without exposing a socket: reclaim it.
+			_ = os.Remove(lock)
+			stole = true
+			deadline = time.Now().Add(connectBudget)
+		}
+		time.Sleep(connectRetry)
+	}
+}
+
+// spawnDetached starts mpv fully detached (setsid, stdio to /dev/null, the
+// process Released so we never Wait or signal it). The lock FILE is kept on
+// disk for the daemon's lifetime — it is the spawn guard, removed only by Quit.
+func spawnDetached(mpvPath string, o Options, sock, lock, queuePath string, lf *os.File) (*Player, error) {
 	// A stale socket from a crashed run would make mpv fail to bind.
 	_ = os.Remove(sock)
 
@@ -173,6 +249,13 @@ func New(o Options) (*Player, error) {
 	}
 	vol := clampVolume(o.Volume)
 
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		lf.Close()
+		_ = os.Remove(lock)
+		return nil, fmt.Errorf("player: open %s: %w", os.DevNull, err)
+	}
+
 	cmd := exec.Command(mpvPath,
 		"--idle=yes",
 		"--no-video",
@@ -180,47 +263,51 @@ func New(o Options) (*Player, error) {
 		"--input-ipc-server="+sock,
 		fmt.Sprintf("--volume=%d", vol),
 		"--ytdl-format="+format,
+		// Gapless transitions: mpv prefetches (resolves + opens) the next
+		// playlist entry slightly before the current one ends, then crossfeeds
+		// without re-initialising the audio chain when codecs match ("weak").
+		"--prefetch-playlist=yes",
+		"--gapless-audio=weak",
 	)
+	cmd.Stdin = devnull
+	cmd.Stdout = devnull
+	cmd.Stderr = devnull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
 	if err := cmd.Start(); err != nil {
+		devnull.Close()
+		lf.Close()
+		_ = os.Remove(lock)
 		return nil, fmt.Errorf("player: start mpv: %w", err)
 	}
+	pid := cmd.Process.Pid
+	// Detach: hand the child to init. We never Wait and never kill it.
+	_ = cmd.Process.Release()
+	devnull.Close()
+	// Record the pid in the lock file (diagnostics) and keep the file on disk.
+	_, _ = lf.WriteString(strconv.Itoa(pid) + "\n")
+	lf.Close()
 
-	// Reap the child in one place: this channel closes when mpv exits, letting
-	// the dial loop fail fast on early death and Close reap without a second
-	// (illegal) cmd.Wait.
-	procDone := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(procDone)
-	}()
-
-	conn, err := dialWithRetry(sock, connectBudget, procDone)
+	conn, err := dialWithRetry(sock, connectBudget)
 	if err != nil {
-		// mpv never exposed the socket (or exited early): kill (harmless if it
-		// already exited) and wait for the reaper goroutine.
-		_ = cmd.Process.Kill()
-		<-procDone
-		_ = os.Remove(sock)
+		// mpv never exposed its socket — drop the lock so a later run retries.
+		_ = os.Remove(lock)
 		return nil, fmt.Errorf("player: connect mpv ipc: %w", err)
 	}
 
-	p := newConn(conn, cmd, sock)
-	p.procDone = procDone
-
-	// Observe the properties we translate into Events. Failures here are
-	// best-effort: the connection is already proven, so a transient hiccup
-	// should not tear down the player.
-	for i, prop := range []string{"time-pos", "duration", "pause", "volume", "mute"} {
-		_, _ = p.command("observe_property", i+1, prop)
-	}
+	p := newConn(conn)
+	p.sock, p.lock, p.queuePath, p.pid = sock, lock, queuePath, pid
+	p.observeProps()
+	// Fresh daemon: empty playlist. Reset the sidecar so a stale queue.json from
+	// a previous session does not mislead the next re-attach.
+	p.setTracks(nil)
+	_ = p.persist(nil)
 	return p, nil
 }
 
-// dialWithRetry repeatedly dials the unix socket until it connects, the budget
-// elapses, or the child process exits (observed via procDone) — the last lets
-// New fail fast with mpv's real death instead of waiting out the full budget on
-// a socket that will never appear.
-func dialWithRetry(sock string, budget time.Duration, procDone <-chan struct{}) (net.Conn, error) {
+// dialWithRetry repeatedly dials the unix socket until it connects or the budget
+// elapses.
+func dialWithRetry(sock string, budget time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(budget)
 	var lastErr error
 	for {
@@ -229,14 +316,6 @@ func dialWithRetry(sock string, budget time.Duration, procDone <-chan struct{}) 
 			return conn, nil
 		}
 		lastErr = err
-		select {
-		case <-procDone:
-			if lastErr == nil {
-				lastErr = errors.New("process exited")
-			}
-			return nil, fmt.Errorf("mpv exited before its IPC socket was ready: %w", lastErr)
-		default:
-		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("socket %q not ready: %w", sock, lastErr)
 		}
@@ -244,14 +323,27 @@ func dialWithRetry(sock string, budget time.Duration, procDone <-chan struct{}) 
 	}
 }
 
+// observeProps subscribes to every property we translate into Events. Failures
+// are best-effort: the connection is already proven.
+func (p *Player) observeProps() {
+	props := []string{
+		"time-pos", "duration", "pause", "volume", "mute",
+		"playlist-pos", "playlist-playing-pos",
+	}
+	for i, prop := range props {
+		_, _ = p.command("observe_property", i+1, prop)
+	}
+}
+
 // Events returns the channel of playback events. It is buffered; when full the
 // player drops the oldest buffered event to make room (non-blocking) so the
 // consumer always converges on the most recent state and mpv is never stalled.
-// The channel is closed by Close or when the reader detects mpv has died.
+// The channel is closed by Close or when the reader detects the conn dropped.
 func (p *Player) Events() <-chan Event { return p.events }
 
 // Load replaces the current file with the given URL (mpv resolves it via
-// yt-dlp).
+// yt-dlp). Prefer the Playlist* methods for queue-backed playback; Load is a
+// single-file convenience that does not update the sidecar.
 func (p *Player) Load(url string) error {
 	_, err := p.command("loadfile", url, "replace")
 	return err
@@ -263,7 +355,7 @@ func (p *Player) TogglePause() error {
 	return err
 }
 
-// Stop stops playback and clears the current file.
+// Stop stops playback. mpv's stop also clears the playlist.
 func (p *Player) Stop() error {
 	_, err := p.command("stop")
 	return err
@@ -288,63 +380,45 @@ func (p *Player) ToggleMute() error {
 	return err
 }
 
-// Close shuts mpv down and releases all resources. It is idempotent and safe to
-// call concurrently. It best-effort sends quit, reaps the process (killing it
-// after a timeout so no zombie is left), fails every pending request, ensures
-// the reader goroutine has fully exited before closing the Events channel, and
-// removes the socket file.
+// Close DETACHES this client from the daemon: it stops the reader goroutine,
+// fails pending requests, closes the Events channel, and closes the connection.
+// mpv, its socket, and playback are left untouched — that is what lets playback
+// survive the TUI exiting. Idempotent and safe to call concurrently. Use Quit to
+// actually terminate the daemon.
 func (p *Player) Close() error {
 	p.closeOnce.Do(func() {
 		// 1. Signal shutdown: new commands fail fast, in-flight ones unblock.
 		p.markClosed()
-
-		// 2. Ask mpv to quit cleanly (best effort; bounded by the write
-		//    deadline so a wedged socket cannot hang us here).
-		p.writeQuit()
-
-		// 3. Reap the child: give it processWait to exit, then kill. The
-		//    single reaper goroutine started in New does the actual Wait.
-		if p.cmd != nil {
-			p.reap()
-		}
-
-		// 4. Close our socket end so the reader unblocks even if mpv ignored
-		//    quit (and there is no child to reap, e.g. in tests).
+		// 2. Close our socket end; the reader unblocks on the resulting error.
 		_ = p.conn.Close()
-
-		// 5. The reader must be fully gone before we touch the channels it
+		// 3. The reader must be fully gone before we touch the channels it
 		//    sends on — this is what prevents a send-on-closed-channel race.
 		<-p.readerDone
-
-		// 6. Fail any pending requests and close events (idempotent: the reader
-		//    already ran finish on its way out, but Close guarantees it).
+		// 4. Fail any pending requests and close events (idempotent).
 		p.finish()
-
-		// 7. Remove the socket file we own.
-		if p.sock != "" {
-			_ = os.Remove(p.sock)
-		}
 	})
 	return nil
 }
 
-// writeQuit sends a fire-and-forget quit command (we do not wait for a reply).
-func (p *Player) writeQuit() {
+// Quit terminates the daemon: it asks mpv to quit, detaches this client, and
+// removes the socket and lock files so the next New spawns a fresh daemon. Used
+// by the CLI -kill flag.
+func (p *Player) Quit() error {
+	// Ask mpv to exit while the connection is still live (best effort).
 	_ = p.write(ipcRequest{Command: []any{"quit"}, RequestID: p.nextRequestID()})
-}
-
-// reap waits for the mpv process to exit, killing it after processWait. The
-// actual cmd.Wait runs in the reaper goroutine started by New (which closes
-// procDone); reap only observes that channel so Wait is never called twice.
-func (p *Player) reap() {
-	select {
-	case <-p.procDone:
-	case <-time.After(processWait):
-		if p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
+	// Detach our client side.
+	_ = p.Close()
+	// Remove the daemon's on-disk artifacts.
+	var firstErr error
+	for _, f := range []string{p.sock, p.lock} {
+		if f == "" {
+			continue
 		}
-		<-p.procDone
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
 // clampVolume bounds a volume percentage to mpv's accepted range.

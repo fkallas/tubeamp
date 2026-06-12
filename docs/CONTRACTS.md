@@ -83,8 +83,14 @@ func (c *Cache) Put(key string, data []byte) error
 
 ## internal/core
 
+`Queue` is the UI's **mirror of daemon state**, not the playback authority: the
+mpv playlist is. The UI rebuilds it from `player.Snapshot()` on attach and
+updates the current index from `EvPlaylistPos`; mutations are applied locally for
+instant feedback and routed to the daemon via the `player.Playlist*`/`Next`/`Prev`
+methods.
+
 ```go
-// Queue is the play queue. Not goroutine-safe; owned by the UI loop.
+// Queue is the play queue (UI mirror). Not goroutine-safe; owned by the UI loop.
 type Queue struct{ ... }
 func NewQueue() *Queue
 func (q *Queue) Items() []model.Track
@@ -92,6 +98,7 @@ func (q *Queue) Len() int
 func (q *Queue) Index() int                       // -1 when nothing current
 func (q *Queue) Current() (model.Track, bool)
 func (q *Queue) Set(ts []model.Track, start int)  // replace queue, current = start
+func (q *Queue) SetIndex(i int)                    // set current directly, clamped to [-1, len-1] (reconcile EvPlaylistPos; no command)
 func (q *Queue) Append(ts ...model.Track)
 func (q *Queue) InsertNext(ts ...model.Track)     // after current
 func (q *Queue) Remove(i int)                     // removing current keeps index pointing at next item
@@ -174,18 +181,33 @@ func Fetch(ctx context.Context, url string) (image.Image, error) // jpeg/png/web
 
 ## internal/player
 
-mpv wrapper. Spawn `mpv --idle=yes --no-video --no-terminal
---input-ipc-server=<sock> --volume=<n> --ytdl-format=<f>`; connect with retry
-(~5s budget); speak the JSON-lines IPC protocol with request_id correlation;
-`observe_property` for time-pos, duration, pause, volume, mute.
+Client for a **persistent, detached mpv daemon** that owns the playback
+playlist. mpv is spawned once — `setsid`, stdio to `/dev/null`, the process
+`Release`d so the parent never `Wait`s or kills it — and keeps playing after the
+TUI exits. Spawn flags: `mpv --idle=yes --no-video --no-terminal
+--input-ipc-server=<sock> --volume=<n> --ytdl-format=<f> --prefetch-playlist=yes
+--gapless-audio=weak`. The last two give **gapless prefetch**: mpv resolves +
+opens the next playlist entry (via yt-dlp) shortly before the current one ends
+and crossfeeds without re-initialising the audio chain when codecs match.
+
+The socket is fixed at `config.DataDir()/mpv.sock`. `New` first tries to ATTACH
+to an existing socket (connect OK → no spawn); otherwise it SPAWNS, guarded by an
+`O_CREATE|O_EXCL` lock file (`<sock>.lock`) plus an attach-retry loop so two
+concurrent clients never start two daemons. The mpv playlist **is** the queue;
+the ordered, richly-typed track list is mirrored to `config.DataDir()/queue.json`
+(atomic temp+rename) on every mutation so a re-attaching client can rebuild full
+metadata (mpv itself only remembers titles for entries it has already played).
 
 ```go
 type Options struct {
     MPVPath    string // "" => "mpv"
-    SocketPath string // "" => os.TempDir()/tubeamp-mpv-<pid>.sock
+    SocketPath string // "" => config.DataDir()/mpv.sock
     YTDLFormat string // "" => "bestaudio"
-    Volume     int    // initial volume
+    Volume     int    // initial volume (spawn only)
+    AttachOnly bool   // never spawn; ErrNotRunning when no daemon is listening
 }
+
+var ErrNotRunning = errors.New("player: mpv daemon not running") // New(AttachOnly) with no daemon
 
 type EventKind int
 const (
@@ -195,26 +217,57 @@ const (
     EvVolume                    // Float 0-100
     EvMute                      // Bool
     EvFileLoaded                // new track started
-    EvTrackEnded                // end-file with reason "eof"
+    EvTrackEnded                // end-file with reason "eof" (UI no longer advances on this)
     EvError                     // Str message (incl. end-file reason "error")
+    EvPlaylistPos               // Int: current playlist index, -1 when idle
 )
 type Event struct {
     Kind  EventKind
     Float float64
     Bool  bool
     Str   string
+    Int   int // EvPlaylistPos
+}
+
+// Snapshot is the full daemon state a re-attaching client rebuilds from.
+type Snapshot struct {
+    Tracks      []model.Track
+    PlaylistPos int     // current playing index, -1 when idle
+    Paused      bool
+    TimePos     float64 // seconds
+    Duration    float64 // seconds
+    Volume      int
+    Mute        bool
 }
 
 type Player struct{ ... }
-func New(o Options) (*Player, error)   // error if binary missing / IPC never connects
+func New(o Options) (*Player, error)   // attach-or-spawn; AttachOnly => ErrNotRunning if no daemon
 func (p *Player) Events() <-chan Event // buffered (~64); sender drops oldest-style (non-blocking) rather than stall
-func (p *Player) Load(url string) error // loadfile <url> replace
+func (p *Player) Load(url string) error // loadfile <url> replace (single-file; does not touch the sidecar)
 func (p *Player) TogglePause() error
-func (p *Player) Stop() error
+func (p *Player) Stop() error                  // mpv's stop also clears the playlist
 func (p *Player) Seek(offsetSec float64) error // relative
 func (p *Player) SetVolume(pct int) error      // clamp 0..120
 func (p *Player) ToggleMute() error
-func (p *Player) Close() error // quit mpv (kill after timeout), close Events, remove socket; idempotent
+
+// Playlist-backed queue. Each entry loads via ["loadfile", url, mode, -1, {force-media-title:<title>}]
+// (mpv >= 0.38 form) so bare mpv consumers see names. mpv auto-advances; the
+// current index is reported via observe_property playlist-pos / playlist-playing-pos.
+func (p *Player) PlaylistReplace(ts []model.Track, start int) error
+func (p *Player) PlaylistAppend(ts ...model.Track) error
+func (p *Player) PlaylistRemove(i int) error
+func (p *Player) PlaylistMove(i, j int) error  // mpv playlist-move semantics (i<j lands at j-1)
+func (p *Player) PlaylistJump(i int) error
+func (p *Player) Next() error                  // playlist-next weak (no-op at end)
+func (p *Player) Prev() error                  // playlist-prev weak (no-op at start)
+func (p *Player) PlaylistClear() error
+
+func (p *Player) Snapshot() (Snapshot, error)  // queue.json reconciled with the live playlist + transport props;
+                                               // missing/corrupt queue.json degrades to titles from the mpv playlist
+
+func (p *Player) Close() error // DETACH: stop goroutines, fail pending, close Events, close conn — mpv, socket
+                               // and playback are left untouched (this is what makes playback persist). Idempotent.
+func (p *Player) Quit() error  // terminate the daemon: send mpv quit, detach, remove socket + lock files (-kill)
 ```
 
 ## internal/ytm (+ internal/ytm/parse)
@@ -327,7 +380,14 @@ func listenPlayer(p *player.Player) tea.Cmd {
 }
 ```
 
-- `EvTrackEnded` → `queue.Advance()`; if ok, play next; else idle state.
+- mpv advances the playlist itself: the UI updates its current index from
+  `EvPlaylistPos` (`Int`, -1 = end-of-queue idle), NOT from `EvTrackEnded` (that
+  event is now a no-op for advancing). On attach with a live daemon, `New` calls
+  `player.Snapshot()` synchronously so the player bar and queue panel show the
+  in-progress track on the first render. Queue mutations (enter/`a`/`A`/`d`/`J`/`K`/`c`,
+  `n`/`p`) update the local `core.Queue` for instant feedback and dispatch the
+  matching `player.Playlist*`/`Next`/`Prev` call in a Cmd; the index reconciles on
+  the next `EvPlaylistPos`.
 - Art: player bar shows 8×4-cell cover. If `track.ThumbURL != ""` fetch via
   Cmd (`art.Fetch` + `art.Render` with theme palette options, cache by
   videoID+theme in the model); fallback/loading state `art.Placeholder`.
@@ -348,6 +408,7 @@ real library lands.
 
 `main.go`: parse flags (`-theme <name>` override, `-version`); `config.Load`;
 `theme.Load` (fall back to `theme.Default()` with a warning); `player.New`
-(on error: nil player, app shows degraded notice); `ytm.LoadAuth(DataDir()/auth)`
-(missing file → nil auth) + `ytm.NewClient`; `core.NewQueue`; `ui.New`;
-`tea.NewProgram(..., tea.WithAltScreen())`. On exit: `player.Close()`.
+(attach-or-spawn; on error: nil player, app shows degraded notice);
+`ytm.LoadAuth(DataDir()/auth)` (missing file → nil auth) + `ytm.NewClient`;
+`core.NewQueue`; `ui.New`; `tea.NewProgram(..., tea.WithAltScreen())`. On exit:
+`player.Close()` — a DETACH, so mpv keeps playing in the background.

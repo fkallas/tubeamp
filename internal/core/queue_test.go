@@ -675,6 +675,33 @@ func TestPrev(t *testing.T) {
 	}
 }
 
+func TestSetIndex(t *testing.T) {
+	tests := []struct {
+		name     string
+		tracks   []model.Track
+		set      int
+		expected int
+	}{
+		{"empty queue clamps to -1", nil, 2, -1},
+		{"valid index", []model.Track{track("1", "A"), track("2", "B"), track("3", "C")}, 2, 2},
+		{"idle (-1) preserved when tracks present", []model.Track{track("1", "A"), track("2", "B")}, -1, -1},
+		{"below -1 clamps to -1", []model.Track{track("1", "A"), track("2", "B")}, -5, -1},
+		{"beyond end clamps to len-1", []model.Track{track("1", "A"), track("2", "B")}, 9, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := NewQueue()
+			if len(tt.tracks) > 0 {
+				q.Set(tt.tracks, 0)
+			}
+			q.SetIndex(tt.set)
+			if q.Index() != tt.expected {
+				t.Errorf("SetIndex(%d): index = %d, want %d", tt.set, q.Index(), tt.expected)
+			}
+		})
+	}
+}
+
 func TestClear(t *testing.T) {
 	tests := []struct {
 		name string

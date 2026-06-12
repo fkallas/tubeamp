@@ -1,15 +1,21 @@
 package player
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/fkallas/tubeamp/internal/model"
 )
 
 // fakeMPV is an in-process stand-in for mpv's JSON-IPC endpoint. It speaks over
@@ -19,6 +25,9 @@ type fakeMPV struct {
 	ln   net.Listener
 	conn net.Conn // the server side of the accepted connection
 	wmu  sync.Mutex
+
+	rmu     sync.Mutex
+	records [][]json.RawMessage // command arrays seen by serveRecord
 }
 
 // newFakeMPV starts a unix-socket server in a temp dir, accepts one connection,
@@ -91,12 +100,71 @@ func (f *fakeMPV) serveEcho() {
 	}
 }
 
+// serveRecord records every command array it receives and replies success with
+// null data, so a caller can assert exactly which IPC commands were issued.
+func (f *fakeMPV) serveRecord() {
+	dec := json.NewDecoder(f.conn)
+	for {
+		var req struct {
+			Command   []json.RawMessage `json:"command"`
+			RequestID int               `json:"request_id"`
+		}
+		if err := dec.Decode(&req); err != nil {
+			return
+		}
+		f.rmu.Lock()
+		f.records = append(f.records, req.Command)
+		f.rmu.Unlock()
+		f.push(fmt.Sprintf(`{"error":"success","request_id":%d,"data":null}`, req.RequestID))
+	}
+}
+
+// cmdRecords returns a snapshot of recorded command arrays.
+func (f *fakeMPV) cmdRecords() [][]json.RawMessage {
+	f.rmu.Lock()
+	defer f.rmu.Unlock()
+	out := make([][]json.RawMessage, len(f.records))
+	copy(out, f.records)
+	return out
+}
+
+// serveProps answers get_property by name from props (value is raw JSON text);
+// unknown properties report "property unavailable". Every other command (incl.
+// observe_property) replies success with null data.
+func (f *fakeMPV) serveProps(props map[string]string) {
+	dec := json.NewDecoder(f.conn)
+	for {
+		var req struct {
+			Command   []json.RawMessage `json:"command"`
+			RequestID int               `json:"request_id"`
+		}
+		if err := dec.Decode(&req); err != nil {
+			return
+		}
+		var name string
+		if len(req.Command) >= 1 {
+			_ = json.Unmarshal(req.Command[0], &name)
+		}
+		if name == "get_property" && len(req.Command) >= 2 {
+			var prop string
+			_ = json.Unmarshal(req.Command[1], &prop)
+			if v, ok := props[prop]; ok {
+				f.push(fmt.Sprintf(`{"error":"success","request_id":%d,"data":%s}`, req.RequestID, v))
+				continue
+			}
+			f.push(fmt.Sprintf(`{"error":"property unavailable","request_id":%d}`, req.RequestID))
+			continue
+		}
+		f.push(fmt.Sprintf(`{"error":"success","request_id":%d,"data":null}`, req.RequestID))
+	}
+}
+
 // TestConcurrentCommandsCorrelate spins many goroutines issuing commands at
 // once and verifies each one receives the reply to *its* request (the echoed
 // argument matches), proving request_id correlation under -race.
 func TestConcurrentCommandsCorrelate(t *testing.T) {
 	f, conn := newFakeMPV(t)
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	defer p.Close()
 	go f.serveEcho()
 
@@ -157,7 +225,7 @@ func TestEventMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f, conn := newFakeMPV(t)
-			p := newConn(conn, nil, "")
+			p := newConn(conn)
 			defer p.Close()
 
 			f.push(tc.line)
@@ -186,7 +254,7 @@ func TestEventMapping(t *testing.T) {
 // stalls (the reader drops rather than blocks).
 func TestEventOverflowDropsNeverBlocks(t *testing.T) {
 	f, conn := newFakeMPV(t)
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	defer p.Close()
 
 	done := make(chan struct{})
@@ -225,7 +293,7 @@ func TestEventOverflowDropsNeverBlocks(t *testing.T) {
 // cmdTimeout is shrunk so the test is fast.
 func TestCommandTimeout(t *testing.T) {
 	_, conn := newFakeMPV(t) // fake never replies, but keeps the conn open
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	defer p.Close()
 	p.cmdTimeout = 50 * time.Millisecond
 
@@ -244,7 +312,7 @@ func TestCommandTimeout(t *testing.T) {
 func TestCloseIdempotentUnblocksInflight(t *testing.T) {
 	f, conn := newFakeMPV(t)
 	_ = f // server intentionally does not reply
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -276,7 +344,7 @@ func TestCloseIdempotentUnblocksInflight(t *testing.T) {
 // returns.
 func TestEventsClosedAfterClose(t *testing.T) {
 	_, conn := newFakeMPV(t)
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	p.Close()
 
 	select {
@@ -293,7 +361,7 @@ func TestEventsClosedAfterClose(t *testing.T) {
 // cleanly instead of hanging.
 func TestCommandsAfterCloseError(t *testing.T) {
 	_, conn := newFakeMPV(t)
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	p.Close()
 
 	if err := p.Load("x"); err == nil {
@@ -305,7 +373,7 @@ func TestCommandsAfterCloseError(t *testing.T) {
 // sending it to mpv.
 func TestSetVolumeClamps(t *testing.T) {
 	f, conn := newFakeMPV(t)
-	p := newConn(conn, nil, "")
+	p := newConn(conn)
 	defer p.Close()
 
 	// Capture what the player sends for an out-of-range volume.
@@ -340,30 +408,424 @@ func TestSetVolumeClamps(t *testing.T) {
 	}
 }
 
-// TestIntegrationRealMPV spawns a real mpv (skipped if not installed) and runs
-// the full New -> SetVolume -> Close lifecycle, asserting no errors and that
-// the process exits and the socket is removed.
-func TestIntegrationRealMPV(t *testing.T) {
+// startFakeServer listens on sock and serves serveEcho on every accepted
+// connection, so the real New() attach path can dial it. It is the seam for the
+// attach-vs-spawn test (a pre-existing socket must make New attach, not spawn).
+func startFakeServer(t *testing.T, sock string) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			f := &fakeMPV{conn: c}
+			go f.serveEcho()
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return ln
+}
+
+// TestNewAttachesToExistingSocket proves New attaches to a live daemon and never
+// spawns: the MPVPath points at a non-existent binary, so a spawn attempt would
+// fail — New succeeding means it took the attach fast-path.
+func TestNewAttachesToExistingSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s")
+	startFakeServer(t, sock)
+
+	p, err := New(Options{SocketPath: sock, MPVPath: "/no/such/tubeamp-mpv-binary"})
+	if err != nil {
+		t.Fatalf("New should attach to the existing socket, got error: %v", err)
+	}
+	defer p.Close()
+	if p.pid != 0 {
+		t.Errorf("attached player recorded a spawn pid %d; it must not have spawned", p.pid)
+	}
+}
+
+// TestNewAttachOnlyErrNotRunning checks AttachOnly returns ErrNotRunning when no
+// daemon is listening (and never spawns).
+func TestNewAttachOnlyErrNotRunning(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s") // nothing listening here
+	_, err := New(Options{SocketPath: sock, AttachOnly: true, MPVPath: "/no/such/mpv"})
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("New(AttachOnly) err = %v, want ErrNotRunning", err)
+	}
+}
+
+// TestQueueFileRoundtrip persists a rich queue and reads it back.
+func TestQueueFileRoundtrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.json")
+	p := &Player{queuePath: path}
+	want := []model.Track{
+		{VideoID: "a", Title: "Alpha", Artists: []string{"X", "Y"}, Album: "Al", Duration: 90 * time.Second},
+		{VideoID: "b", Title: "Beta"},
+	}
+	if err := p.persist(want); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	got, err := readQueueFile(path)
+	if err != nil {
+		t.Fatalf("readQueueFile: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("roundtrip len = %d, want %d", len(got), len(want))
+	}
+	if got[0].Title != "Alpha" || got[0].Album != "Al" || got[0].Duration != 90*time.Second {
+		t.Errorf("roundtrip lost metadata: %+v", got[0])
+	}
+	if len(got[0].Artists) != 2 || got[0].Artists[0] != "X" {
+		t.Errorf("roundtrip lost artists: %+v", got[0].Artists)
+	}
+}
+
+// TestReadQueueFileTolerates checks corrupt and missing files error cleanly
+// (callers treat the error as "no sidecar" and degrade) rather than panicking.
+func TestReadQueueFileTolerates(t *testing.T) {
+	dir := t.TempDir()
+	corrupt := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(corrupt, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readQueueFile(corrupt); err == nil {
+		t.Error("readQueueFile on corrupt file returned nil error")
+	}
+	if _, err := readQueueFile(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("readQueueFile on missing file returned nil error")
+	}
+}
+
+// TestPlaylistMutationsMirrorAndPersist drives the playlist methods against an
+// echo fake and asserts the in-memory model and queue.json sidecar track the
+// mutations (replace, append, remove, move, clear).
+func TestPlaylistMutationsMirrorAndPersist(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	go f.serveEcho()
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	a := model.Track{VideoID: "a", Title: "A"}
+	b := model.Track{VideoID: "b", Title: "B"}
+	c := model.Track{VideoID: "c", Title: "C"}
+
+	titlesOf := func(ts []model.Track) string {
+		var s []byte
+		for _, t := range ts {
+			s = append(s, t.Title...)
+		}
+		return string(s)
+	}
+	wantSidecar := func(want string) {
+		t.Helper()
+		got, err := readQueueFile(p.queuePath)
+		if err != nil {
+			t.Fatalf("readQueueFile: %v", err)
+		}
+		if titlesOf(got) != want {
+			t.Fatalf("sidecar = %q, want %q", titlesOf(got), want)
+		}
+	}
+
+	if err := p.PlaylistReplace([]model.Track{a, b}, 0); err != nil {
+		t.Fatalf("PlaylistReplace: %v", err)
+	}
+	wantSidecar("AB")
+	if err := p.PlaylistAppend(c); err != nil {
+		t.Fatalf("PlaylistAppend: %v", err)
+	}
+	wantSidecar("ABC")
+	if err := p.PlaylistRemove(1); err != nil { // drop B
+		t.Fatalf("PlaylistRemove: %v", err)
+	}
+	wantSidecar("AC")
+	if err := p.PlaylistMove(1, 0); err != nil { // C before A
+		t.Fatalf("PlaylistMove: %v", err)
+	}
+	wantSidecar("CA")
+	if err := p.PlaylistClear(); err != nil {
+		t.Fatalf("PlaylistClear: %v", err)
+	}
+	wantSidecar("")
+}
+
+// TestLoadEntryCommandForm asserts loadfile uses the mpv >= 0.38 five-element
+// form with index -1 and a force-media-title options *map* (so titles with
+// commas survive). This is the form a probe proved mpv 0.41 requires.
+func TestLoadEntryCommandForm(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	go f.serveRecord()
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	if err := p.PlaylistAppend(model.Track{VideoID: "vid", Title: "Hello, World"}); err != nil {
+		t.Fatalf("PlaylistAppend: %v", err)
+	}
+
+	var loadfile []json.RawMessage
+	for _, rec := range f.cmdRecords() {
+		var name string
+		if len(rec) >= 1 {
+			_ = json.Unmarshal(rec[0], &name)
+		}
+		if name == "loadfile" {
+			loadfile = rec
+		}
+	}
+	if loadfile == nil {
+		t.Fatal("no loadfile command was issued")
+	}
+	if len(loadfile) != 5 {
+		t.Fatalf("loadfile arity = %d, want 5 [loadfile url mode index options]: %v", len(loadfile), loadfile)
+	}
+	var url, mode string
+	var index int
+	var opts map[string]string
+	_ = json.Unmarshal(loadfile[1], &url)
+	_ = json.Unmarshal(loadfile[2], &mode)
+	_ = json.Unmarshal(loadfile[3], &index)
+	_ = json.Unmarshal(loadfile[4], &opts)
+	if url != (model.Track{VideoID: "vid"}).URL() {
+		t.Errorf("loadfile url = %q", url)
+	}
+	if mode != "append" {
+		t.Errorf("loadfile mode = %q, want append", mode)
+	}
+	if index != -1 {
+		t.Errorf("loadfile index = %d, want -1", index)
+	}
+	if opts["force-media-title"] != "Hello, World" {
+		t.Errorf("force-media-title = %q, want %q", opts["force-media-title"], "Hello, World")
+	}
+}
+
+// TestSnapshotUsesRichSidecar checks Snapshot reconciles the live playlist with
+// queue.json (matching counts => rich metadata wins) and reads the properties.
+func TestSnapshotUsesRichSidecar(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	props := map[string]string{
+		"playlist": `[{"filename":"https://music.youtube.com/watch?v=a","title":"A"},` +
+			`{"filename":"https://music.youtube.com/watch?v=b","title":"B"}]`,
+		"playlist-pos": "1",
+		"pause":        "true",
+		"time-pos":     "12.5",
+		"duration":     "200",
+		"volume":       "70",
+		"mute":         "false",
+	}
+	go f.serveProps(props)
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	// Sidecar with the same count but richer titles.
+	if err := p.persist([]model.Track{
+		{VideoID: "a", Title: "Alpha", Artists: []string{"X"}},
+		{VideoID: "b", Title: "Beta"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := p.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(s.Tracks) != 2 || s.Tracks[0].Title != "Alpha" || s.Tracks[1].Title != "Beta" {
+		t.Errorf("snapshot tracks = %+v, want rich sidecar titles", s.Tracks)
+	}
+	if s.PlaylistPos != 1 || !s.Paused || s.TimePos != 12.5 || s.Duration != 200 || s.Volume != 70 || s.Mute {
+		t.Errorf("snapshot props = %+v", s)
+	}
+}
+
+// TestSnapshotDegradesWithoutSidecar checks that a missing queue.json falls back
+// to titles from the live mpv playlist rather than crashing.
+func TestSnapshotDegradesWithoutSidecar(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	props := map[string]string{
+		"playlist":     `[{"filename":"https://music.youtube.com/watch?v=zz","title":"Zee"}]`,
+		"playlist-pos": "0",
+	}
+	go f.serveProps(props)
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json") // never written
+	defer p.Close()
+
+	s, err := p.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(s.Tracks) != 1 || s.Tracks[0].Title != "Zee" || s.Tracks[0].VideoID != "zz" {
+		t.Errorf("degraded snapshot = %+v, want one track Zee/zz from the live playlist", s.Tracks)
+	}
+}
+
+// writeSilenceWAV writes a minimal 16-bit PCM mono WAV of ~0.4s of silence and
+// returns its path. Used by the real-mpv integration test.
+func writeSilenceWAV(t *testing.T, path string) string {
+	t.Helper()
+	const (
+		sampleRate = 8000
+		channels   = 1
+		bits       = 16
+	)
+	nSamples := sampleRate * 4 / 10 // 0.4s
+	dataSize := nSamples * channels * bits / 8
+
+	var b bytes.Buffer
+	b.WriteString("RIFF")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(36+dataSize))
+	b.WriteString("WAVE")
+	b.WriteString("fmt ")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(1)) // PCM
+	_ = binary.Write(&b, binary.LittleEndian, uint16(channels))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(sampleRate*channels*bits/8))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(channels*bits/8))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(bits))
+	b.WriteString("data")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(dataSize))
+	b.Write(make([]byte, dataSize))
+
+	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+		t.Fatalf("write wav: %v", err)
+	}
+	return path
+}
+
+// waitPlaylistPos drains events until an EvPlaylistPos with the wanted index
+// arrives (proving mpv advanced the playlist itself) or the timeout elapses.
+func waitPlaylistPos(p *Player, want int, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev, ok := <-p.Events():
+			if !ok {
+				return false
+			}
+			if ev.Kind == EvPlaylistPos && ev.Int == want {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
+// waitProcessGone reaps the (possibly zombie) child pid via wait4(WNOHANG) until
+// it is gone or the timeout elapses. The child is a zombie until reaped because
+// the test process — its parent — never Waits on the detached mpv.
+func waitProcessGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		var ws syscall.WaitStatus
+		wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		if err != nil || wpid == pid {
+			return true // ECHILD (already gone) or reaped just now
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestPersistentDaemonRealMPV is the end-to-end test for the persistent,
+// detached daemon. It spawns mpv, plays two tiny WAVs, watches mpv auto-advance,
+// detaches (Close) while mpv keeps running, re-attaches and rebuilds state via
+// Snapshot, then Quits and verifies the process and socket are gone. Skipped
+// when mpv is absent. Kept hermetic by pointing HOME/XDG at temp dirs.
+func TestPersistentDaemonRealMPV(t *testing.T) {
 	if _, err := exec.LookPath("mpv"); err != nil {
 		t.Skip("mpv not installed")
 	}
-	sock := filepath.Join(t.TempDir(), "s")
-	p, err := New(Options{SocketPath: sock, Volume: 40})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "s")
+	w1 := writeSilenceWAV(t, filepath.Join(dir, "a.wav"))
+	w2 := writeSilenceWAV(t, filepath.Join(dir, "b.wav"))
+	urlByID := map[string]string{"a": w1, "b": w2}
+	urlFn := func(tr model.Track) string { return urlByID[tr.VideoID] }
+
+	p, err := New(Options{SocketPath: sock, Volume: 0})
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("New(spawn): %v", err)
 	}
-	if err := p.SetVolume(55); err != nil {
-		t.Errorf("SetVolume: %v", err)
+	p.urlFunc = urlFn
+	pid := p.pid
+	if pid == 0 {
+		t.Fatal("a spawned player must record its mpv pid")
 	}
+
+	ta := model.Track{VideoID: "a", Title: "Track A", Duration: 400 * time.Millisecond}
+	tb := model.Track{VideoID: "b", Title: "Track B", Duration: 400 * time.Millisecond}
+	if err := p.PlaylistReplace([]model.Track{ta, tb}, 0); err != nil {
+		t.Fatalf("PlaylistReplace: %v", err)
+	}
+
+	if !waitPlaylistPos(p, 1, 6*time.Second) {
+		t.Fatal("mpv did not auto-advance to playlist index 1 (no EvPlaylistPos=1)")
+	}
+
+	// Detach: mpv must keep running.
 	if err := p.Close(); err != nil {
-		t.Errorf("Close: %v", err)
+		t.Fatalf("Close: %v", err)
 	}
-	// Process must be reaped.
-	if p.cmd != nil && p.cmd.ProcessState == nil {
-		t.Error("mpv process was not reaped (ProcessState nil after Close)")
+	if !processAlive(pid) {
+		t.Fatal("mpv exited after Close; detach must leave playback running")
 	}
-	// Socket file must be gone.
+
+	// Re-attach: must not spawn, and must rebuild rich state.
+	p2, err := New(Options{SocketPath: sock})
+	if err != nil {
+		t.Fatalf("New(re-attach): %v", err)
+	}
+	p2.urlFunc = urlFn
+	if p2.pid != 0 {
+		t.Errorf("re-attach spawned a process (pid %d); it should have attached", p2.pid)
+	}
+	snap, err := p2.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Tracks) != 2 {
+		t.Fatalf("snapshot tracks = %d, want 2", len(snap.Tracks))
+	}
+	if snap.Tracks[0].Title != "Track A" || snap.Tracks[1].Title != "Track B" {
+		t.Errorf("snapshot lost rich titles: %q, %q", snap.Tracks[0].Title, snap.Tracks[1].Title)
+	}
+
+	// Quit: terminate the daemon and remove socket + lock.
+	if err := p2.Quit(); err != nil {
+		t.Fatalf("Quit: %v", err)
+	}
+	if !waitProcessGone(pid, 6*time.Second) {
+		t.Error("mpv still alive after Quit")
+	}
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
-		t.Errorf("socket not removed after Close: stat err = %v", err)
+		t.Errorf("socket not removed after Quit: stat err = %v", err)
 	}
+	if _, err := os.Stat(sock + ".lock"); !os.IsNotExist(err) {
+		t.Errorf("lock file not removed after Quit: stat err = %v", err)
+	}
+}
+
+// processAlive reports whether pid refers to a live (or zombie) process.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
 }

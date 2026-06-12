@@ -147,16 +147,56 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
 		m.setError("mpv not found — playback disabled")
+	} else {
+		// Attaching to a live daemon: rebuild the queue and now-playing state so
+		// an in-progress track shows in the player bar and queue panel at once.
+		m.applySnapshot()
 	}
 	return m
 }
 
-// Init starts the player-event bridge when a player is present.
-func (m Model) Init() tea.Cmd {
-	if m.p != nil {
-		return listenPlayer(m.p)
+// applySnapshot seeds the UI's mirror (queue + transport state) from the daemon
+// on attach. It is a best-effort, synchronous read so the very first render
+// already reflects whatever mpv is playing.
+func (m *Model) applySnapshot() {
+	s, err := m.p.Snapshot()
+	if err != nil {
+		return
 	}
-	return nil
+	m.q.Set(s.Tracks, 0)
+	m.q.SetIndex(s.PlaylistPos)
+	m.paused = s.Paused
+	m.muted = s.Mute
+	m.timePos = s.TimePos
+	m.duration = s.Duration
+	if s.Volume > 0 {
+		m.volume = s.Volume
+	}
+	if s.PlaylistPos >= 0 {
+		if t, ok := m.q.Current(); ok {
+			m.nowPlaying = t
+			m.hasNow = true
+			m.queueCursor = s.PlaylistPos
+			if m.duration == 0 {
+				m.duration = t.Duration.Seconds()
+			}
+			m.artBlock = art.Placeholder(t.VideoID, 8, 4, art.Options{Palette: m.th.Palette()})
+		}
+	}
+}
+
+// Init starts the player-event bridge and, when a track is already playing
+// (attached to a live daemon), kicks off its cover-art fetch.
+func (m Model) Init() tea.Cmd {
+	var cmds []tea.Cmd
+	if m.p != nil {
+		cmds = append(cmds, listenPlayer(m.p))
+	}
+	if m.hasNow && m.nowPlaying.ThumbURL != "" {
+		m.artInflight[m.nowPlaying.VideoID] = struct{}{}
+		cmds = append(cmds, artFetchCmd(m.nowPlaying))
+	}
+	return tea.Batch(cmds...)
 }
 
 // FocusedPanel reports the focused panel as "Library", "Playlists", "Queue" or
@@ -210,13 +250,60 @@ func listenPlayer(p *player.Player) tea.Cmd {
 	}
 }
 
-func loadCmd(p *player.Player, url string) tea.Cmd {
+// Queue mutations route through the daemon's playlist. Each returns a Cmd so
+// Update never blocks; the mpv playlist is the source of truth and the UI
+// reconciles its current index from EvPlaylistPos.
+
+func replaceCmd(p *player.Player, ts []model.Track, start int) tea.Cmd {
 	return func() tea.Msg {
-		if err := p.Load(url); err != nil {
+		if err := p.PlaylistReplace(ts, start); err != nil {
 			return statusMsg{text: "playback error: " + err.Error(), isErr: true}
 		}
 		return nil
 	}
+}
+
+func appendCmd(p *player.Player, t model.Track) tea.Cmd {
+	return func() tea.Msg { _ = p.PlaylistAppend(t); return nil }
+}
+
+// insertNextCmd appends then moves the new entry to sit right after the current
+// one (the daemon has no single insert-next primitive). from is the index the
+// appended track lands at; to is the desired slot.
+func insertNextCmd(p *player.Player, t model.Track, from, to int) tea.Cmd {
+	return func() tea.Msg {
+		if err := p.PlaylistAppend(t); err != nil {
+			return statusMsg{text: "playback error: " + err.Error(), isErr: true}
+		}
+		if to >= 0 && to != from {
+			_ = p.PlaylistMove(from, to)
+		}
+		return nil
+	}
+}
+
+func removeCmd(p *player.Player, i int) tea.Cmd {
+	return func() tea.Msg { _ = p.PlaylistRemove(i); return nil }
+}
+
+func moveCmd(p *player.Player, i, j int) tea.Cmd {
+	return func() tea.Msg { _ = p.PlaylistMove(i, j); return nil }
+}
+
+func jumpCmd(p *player.Player, i int) tea.Cmd {
+	return func() tea.Msg { _ = p.PlaylistJump(i); return nil }
+}
+
+func nextCmd(p *player.Player) tea.Cmd {
+	return func() tea.Msg { _ = p.Next(); return nil }
+}
+
+func prevCmd(p *player.Player) tea.Cmd {
+	return func() tea.Msg { _ = p.Prev(); return nil }
+}
+
+func clearCmd(p *player.Player) tea.Cmd {
+	return func() tea.Msg { _ = p.PlaylistClear(); return nil }
 }
 
 func togglePauseCmd(p *player.Player) tea.Cmd {
@@ -387,18 +474,13 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 		m.muted = ev.Bool
 	case player.EvFileLoaded:
 		m.paused = false
+	case player.EvPlaylistPos:
+		// mpv advances the playlist itself; this is how the UI learns the
+		// current track changed (auto-advance, or our own next/prev/jump).
+		cmd = m.applyPlaylistPos(ev.Int)
 	case player.EvTrackEnded:
-		if t, ok := m.q.Advance(); ok {
-			m.queueCursor = m.q.Index()
-			cmd = m.playTrack(t)
-		} else {
-			// Queue exhausted: go idle but keep the queue.
-			m.hasNow = false
-			m.paused = false
-			m.timePos = 0
-			m.duration = 0
-			m.artBlock = ""
-		}
+		// No-op: mpv advances the playlist on its own and reports the new
+		// position via EvPlaylistPos (including -1 at end-of-queue → idle).
 	case player.EvError:
 		if ev.Str != "" {
 			m.setError("player: " + ev.Str)
@@ -477,33 +559,61 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if t, ok := m.mainCurrent(); ok {
 				m.q.Append(t)
 				m.setStatus("queued: " + t.Title)
+				if m.p != nil {
+					cmd = appendCmd(m.p, t)
+				}
 			}
 		}
 	case key.Matches(msg, k.InsertNext):
 		if m.focus == focusMain {
 			if t, ok := m.mainCurrent(); ok {
+				from := m.q.Len() // appended entry lands at the end
+				to := from        // default (no current): append, no move
+				if cur := m.q.Index(); cur >= 0 {
+					to = cur + 1 // sit right after the current track
+				}
 				m.q.InsertNext(t)
 				m.setStatus("playing next: " + t.Title)
+				if m.p != nil {
+					cmd = insertNextCmd(m.p, t, from, to)
+				}
 			}
 		}
 	case key.Matches(msg, k.Remove):
 		if m.focus == focusQueue {
-			m.removeFromQueue()
+			cmd = m.removeFromQueue()
 		}
 	case key.Matches(msg, k.MoveUp):
 		if m.focus == focusQueue && m.queueCursor > 0 {
-			m.q.Move(m.queueCursor, m.queueCursor-1)
+			// Swap with the entry above: Move(i, i-1) relocates i to i-1.
+			i, j := m.queueCursor, m.queueCursor-1
+			m.q.Move(i, j)
 			m.queueCursor--
+			if m.p != nil {
+				cmd = moveCmd(m.p, i, j)
+			}
 		}
 	case key.Matches(msg, k.MoveDown):
 		if m.focus == focusQueue && m.queueCursor < m.q.Len()-1 {
-			m.q.Move(m.queueCursor, m.queueCursor+1)
+			// Swap with the entry below: Move(i+1, i) relocates i+1 to i.
+			i, j := m.queueCursor+1, m.queueCursor
+			m.q.Move(i, j)
 			m.queueCursor++
+			if m.p != nil {
+				cmd = moveCmd(m.p, i, j)
+			}
 		}
 	case key.Matches(msg, k.ClearQueue):
 		if m.focus == focusQueue {
 			m.q.Clear()
 			m.queueCursor = 0
+			m.hasNow = false
+			m.artBlock = ""
+			m.timePos = 0
+			m.duration = 0
+			if m.p != nil {
+				cmd = clearCmd(m.p)
+			}
 		}
 	}
 
@@ -638,40 +748,55 @@ func (m *Model) handleEnter() tea.Cmd {
 			m.setFocus(focusMain)
 		}
 	case focusQueue:
-		if t, ok := m.q.JumpTo(m.queueCursor); ok {
-			return m.playTrack(t)
+		if m.queueCursor < 0 || m.queueCursor >= m.q.Len() {
+			return nil
 		}
+		if m.p == nil {
+			m.setError("mpv not found — playback disabled")
+			return nil
+		}
+		m.q.JumpTo(m.queueCursor)
+		return tea.Batch(m.reflectCurrent(true), jumpCmd(m.p, m.queueCursor))
 	case focusMain:
 		top := m.stack[len(m.stack)-1]
 		if len(top.tracks) > 0 {
 			m.q.Set(top.tracks, top.cursor)
 			m.queueCursor = m.q.Index()
-			if t, ok := m.q.Current(); ok {
-				return m.playTrack(t)
+			if m.p == nil {
+				m.setError("mpv not found — playback disabled")
+				return nil
 			}
+			return tea.Batch(m.reflectCurrent(true), replaceCmd(m.p, top.tracks, top.cursor))
 		}
 	}
 	return nil
 }
 
-// skip advances (forward) or rewinds (backward) the queue and plays the result.
+// skip moves to the next (forward) or previous track. The local mirror advances
+// optimistically and the daemon's Next/Prev runs in a Cmd; EvPlaylistPos later
+// reconciles the index. At a queue boundary it is a no-op.
 func (m *Model) skip(forward bool) tea.Cmd {
 	if m.p == nil {
 		m.setError("mpv not found — playback disabled")
 		return nil
 	}
-	var t model.Track
 	var ok bool
 	if forward {
-		t, ok = m.q.Advance()
+		_, ok = m.q.Advance()
 	} else {
-		t, ok = m.q.Prev()
+		_, ok = m.q.Prev()
 	}
 	if !ok {
 		return nil
 	}
 	m.queueCursor = m.q.Index()
-	return m.playTrack(t)
+	var pcmd tea.Cmd
+	if forward {
+		pcmd = nextCmd(m.p)
+	} else {
+		pcmd = prevCmd(m.p)
+	}
+	return tea.Batch(m.reflectCurrent(true), pcmd)
 }
 
 // playbackCmd runs fn(player) when a player is present, otherwise sets the
@@ -684,22 +809,54 @@ func (m *Model) playbackCmd(fn func(*player.Player) tea.Cmd) tea.Cmd {
 	return fn(m.p)
 }
 
-// playTrack sets the now-playing track, primes the cover art, and issues the
-// load command. In degraded mode (no player) it sets none of the now-playing
-// state — showing a frozen progress bar and an active play glyph for audio that
-// never starts would be misleading — and only surfaces the disabled notice.
-func (m *Model) playTrack(t model.Track) tea.Cmd {
-	if m.p == nil {
-		m.setError("mpv not found — playback disabled")
+// reflectCurrent updates the now-playing display from the queue's current track,
+// returning the cover-art command. resetTime zeroes the progress bar when the
+// track actually changed (a fresh load starts at 0). When the queue has no
+// current track it goes idle.
+func (m *Model) reflectCurrent(resetTime bool) tea.Cmd {
+	t, ok := m.q.Current()
+	if !ok {
+		m.hasNow = false
+		if resetTime {
+			m.timePos = 0
+			m.duration = 0
+		}
+		m.artBlock = ""
 		return nil
 	}
+	newTrack := !m.hasNow || m.nowPlaying.VideoID != t.VideoID
 	m.nowPlaying = t
 	m.hasNow = true
 	m.paused = false
-	m.timePos = 0
-	m.duration = t.Duration.Seconds()
+	if resetTime && newTrack {
+		m.timePos = 0
+		m.duration = t.Duration.Seconds()
+	}
+	return m.refreshArt()
+}
 
-	return tea.Batch(m.refreshArt(), loadCmd(m.p, t.URL()))
+// applyPlaylistPos reconciles the UI's current index with the daemon's
+// playlist-pos (mpv advances the playlist itself). A position equal to the local
+// index is a no-op (our own mutation already reflected it); -1 means end-of-queue
+// idle.
+func (m *Model) applyPlaylistPos(pos int) tea.Cmd {
+	if pos == m.q.Index() {
+		if pos < 0 {
+			m.hasNow = false
+		}
+		return nil
+	}
+	m.q.SetIndex(pos)
+	if pos < 0 {
+		m.hasNow = false
+		m.paused = false
+		m.timePos = 0
+		m.duration = 0
+		m.artBlock = ""
+		return nil
+	}
+	m.queueCursor = pos
+	return m.reflectCurrent(true)
 }
 
 // refreshArt updates artBlock for the current track+theme. It prefers, in
@@ -751,18 +908,31 @@ func (m *Model) mainCurrent() (model.Track, bool) {
 	return top.tracks[top.cursor], true
 }
 
-func (m *Model) removeFromQueue() {
+// removeFromQueue drops the entry under the queue cursor locally and on the
+// daemon. Removing the currently-playing entry makes mpv advance to the next, so
+// the now-playing display is refreshed from the new current track.
+func (m *Model) removeFromQueue() tea.Cmd {
 	n := m.q.Len()
 	if n == 0 || m.queueCursor < 0 || m.queueCursor >= n {
-		return
+		return nil
 	}
-	m.q.Remove(m.queueCursor)
+	idx := m.queueCursor
+	wasCurrent := idx == m.q.Index()
+	m.q.Remove(idx)
 	if m.queueCursor >= m.q.Len() {
 		m.queueCursor = m.q.Len() - 1
 	}
 	if m.queueCursor < 0 {
 		m.queueCursor = 0
 	}
+	var cmd tea.Cmd
+	if wasCurrent && m.p != nil {
+		cmd = m.reflectCurrent(true)
+	}
+	if m.p != nil {
+		return tea.Batch(cmd, removeCmd(m.p, idx))
+	}
+	return cmd
 }
 
 // setMain replaces the main-view stack with a single content frame. It also
