@@ -580,9 +580,7 @@ func CompositeCenter(overlay, background string) string
 ### Layout
 
 ```
-╭─────────────╮                                      v0.1.0   ← logo header (3 rows)
-│ ◉ ◎ ◉ ┃┃┃ │  tubeamp
-╰─────────────╯  ───────                   ● account
+tubeamp                              v0.1.0   ● account   ← wordmark header (1 row)
 ╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
 ╰────────────╯│      main view                  │
@@ -597,21 +595,23 @@ func CompositeCenter(overlay, background string) string
  <context-sensitive key hints, single line>
 ```
 
-Logo header: 3 rows (`logoHeight`), an "amp with knobs" motif — a small
-box-drawn amplifier cabinet with a row of round knobs and a speaker grille on
-the left, the "tubeamp" wordmark to its right, and a short underline rule
-beneath the wordmark (whole motif ~24 cols). The cabinet border renders in
-AccentStyle, the leftmost ("power") knob in PlayingStyle (so it glows) with the
-remaining knobs in AccentStyle, the speaker grille + underline rule + "v0.1.0"
-(right-aligned, row 1) in Muted, and the wordmark in Primary. When terminal
-height < `logoMinTermHeight` (25) the logo is hidden entirely and the panel area
-reclaims those rows. Colours come strictly from theme tokens — no hardcoded hex.
+Wordmark header: 1 row (`logoHeight`), a plain "tubeamp" wordmark (7 letters) in
+the top-left whose letters cycle through the theme's colours as an animation —
+letter `i` takes `theme.Palette()[(i+phase) % len(palette)]` (image/color values
+converted to lipgloss colours), so advancing `phase` flows the colours across the
+word. A `tea.Tick` (~250ms, started in `Init` and re-issued on each
+`logoTickMsg`) increments the phase (a model field) and the view re-renders; the
+tick is cheap and independent of every other Cmd. The Muted "v0.1.0" version tag
+and the sign-in indicator ride the same row, right-aligned. When terminal height
+< `logoMinTermHeight` (= `minHeight + logoHeight`) the header is hidden and the
+panel area reclaims that row (the panel-area floor needs that row at the shortest
+size). Colours come strictly from theme tokens/palette — no hardcoded hex.
 
 Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
 `AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently
-at the right end of the logo's rule row (ANSI-aware-truncated with an ellipsis
-when a long account name would not fit), or right-aligned on the bottom status
-line when the logo is hidden (truncated the same way — on either home an
+at the right end of the wordmark header row (ANSI-aware-truncated with an
+ellipsis when a long account name would not fit), or right-aligned on the bottom
+status line when the header is hidden (truncated the same way — on either home an
 oversized indicator must clip, never widen the row past the terminal and break
 the full-width frame invariant). Signed in => "● <name>" in PlayingStyle; an auth
 file that resolves anonymous (a stale cookie) => "○ anonymous — cookie stale?

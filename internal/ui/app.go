@@ -211,6 +211,11 @@ type Model struct {
 	// The highlighted line is driven off m.timePos via lyrics.CurrentLine — no
 	// extra event wiring.
 	lyricsCache map[string]lyricResult
+
+	// logoPhase advances on every logoTickMsg; the wordmark colours each letter
+	// from the theme palette at offset (i+logoPhase), so advancing it flows the
+	// colours across the word (see renderWordmark / logoTickCmd).
+	logoPhase int
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -301,6 +306,8 @@ func (m Model) Init() tea.Cmd {
 	if m.c != nil {
 		cmds = append(cmds, accountInfoCmd(m.c))
 	}
+	// Drive the wordmark colour-cycle animation.
+	cmds = append(cmds, logoTickCmd())
 	return tea.Batch(cmds...)
 }
 
@@ -323,6 +330,21 @@ func (m Model) FocusedPanel() string {
 
 type playerEventMsg player.Event
 type playerClosedMsg struct{}
+
+// logoTickMsg drives the wordmark colour-cycle animation: each tick advances
+// m.logoPhase so the palette colours flow across the letters, then the view
+// re-renders. It carries no payload and is cheap — handling it just bumps an int
+// and re-arms the tick, never touching other Cmds.
+type logoTickMsg struct{}
+
+// logoTickInterval is the wordmark colour-cycle cadence.
+const logoTickInterval = 250 * time.Millisecond
+
+// logoTickCmd schedules the next wordmark animation tick.
+func logoTickCmd() tea.Cmd {
+	return tea.Tick(logoTickInterval, func(time.Time) tea.Msg { return logoTickMsg{} })
+}
+
 type artMsg struct {
 	videoID string
 	img     image.Image
@@ -910,6 +932,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case lyricsMsg:
 		m.applyLyrics(msg)
 		return m, nil
+
+	case logoTickMsg:
+		// Advance the wordmark colour-cycle and re-arm the tick. Cheap and
+		// independent of every other Cmd.
+		m.logoPhase++
+		return m, logoTickCmd()
 	}
 
 	return m, nil
@@ -1233,7 +1261,8 @@ func (m *Model) markCursorMoved() {
 }
 
 // halfPageRows is the vim-style ctrl+d/ctrl+u jump distance: half the panel
-// area's height. Short lists simply clamp at their edges.
+// area's height. Short lists simply clamp at their edges. The 1-row header is
+// reserved when shown (>= logoMinTermHeight), plus player bar (6) + hint (1).
 func (m *Model) halfPageRows() int {
 	logoOff := 0
 	if m.height >= logoMinTermHeight {
@@ -1771,9 +1800,10 @@ func (m *Model) downgradeAuth() {
 	m.authName = ""
 }
 
-// authIndicator returns the styled sign-in status shown at the right end of the
-// logo row (or the status line when the logo is hidden), or "" before the
-// one-shot AccountInfo check has resolved. Signed in => "● <name>" in
+// authIndicator returns the styled sign-in status shown right-aligned on the
+// wordmark header row (or the status line when the header is hidden on the
+// shortest terminal), or "" before the one-shot AccountInfo check has
+// resolved. Signed in => "● <name>" in
 // PlayingStyle; an auth file that resolves anonymous (a stale cookie) =>
 // "○ anonymous — cookie stale? see README" in Muted; no auth file at all =>
 // "○ not signed in" in Muted.
@@ -1811,19 +1841,23 @@ func (m Model) View() string {
 		return m.tooSmall()
 	}
 
-	// Logo header: logoHeight (3) rows when terminal is tall enough, otherwise
-	// hidden. The sign-in indicator rides the right end of the logo's rule row;
-	// when the logo is hidden it falls through to the status line (see bottomLine).
+	// Wordmark header: one row (logoHeight), shown whenever the terminal has the
+	// headroom (>= logoMinTermHeight); at the very shortest height it is
+	// suppressed and the panel area reclaims the row. The colour-cycling
+	// "tubeamp" wordmark sits top-left; the version tag and the sign-in indicator
+	// ride the same row, right-aligned. logoPhase drives the colour animation.
+	// When the header is hidden the indicator falls through to the status line.
 	ind := m.authIndicator()
-	logo := renderLogo(m.th, m.width, m.height, ind)
+	logo := ""
 	logoOff := 0
-	if logo != "" {
+	if m.height >= logoMinTermHeight {
+		logo = renderLogo(m.th, m.width, m.logoPhase, ind)
 		logoOff = logoHeight
 	}
 
 	leftW := clamp(m.width*3/10, 24, 40)
 	mainW := m.width - leftW
-	// player bar (6) + hint line (1) + logo header rows
+	// player bar (6) + hint line (1) + header row (logoOff)
 	topH := m.height - 7 - logoOff
 
 	// The lyrics panel (when shown) takes a band at the bottom of the RIGHT
@@ -1876,7 +1910,7 @@ func (m Model) View() string {
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
 	hint := m.statusRow(logo != "", ind)
 
-	// Assemble: optional logo header then panels, player bar, hints.
+	// Assemble: wordmark header then panels, player bar, hints.
 	parts := make([]string, 0, 4)
 	if logo != "" {
 		parts = append(parts, logo)
@@ -1921,18 +1955,18 @@ func (m Model) tooSmall() string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, msg)
 }
 
-// statusRow renders the bottom status/hint line. When the logo is hidden the
-// sign-in indicator is right-aligned onto this line (its natural home, the logo
-// rule row, is gone); otherwise the line is just the hint/toast content.
+// statusRow renders the bottom status/hint line. The sign-in indicator normally
+// rides the wordmark header row; only when the header is hidden (the very
+// shortest terminal) does it fall through onto this line, right-aligned.
 func (m Model) statusRow(logoShown bool, ind string) string {
 	if logoShown || ind == "" {
 		return m.bottomLine(m.width)
 	}
 	indW := lipgloss.Width(ind)
-	// Like the logo rule row, a long account name must clip (ANSI-aware,
-	// ellipsis tail), never widen the row: an oversized indicator here would
-	// make JoinVertical pad EVERY frame row past the terminal width, hard-
-	// wrapping and garbling the whole UI.
+	// Like the header row, a long account name must clip (ANSI-aware, ellipsis
+	// tail), never widen the row: an oversized indicator here would make
+	// JoinVertical pad EVERY frame row past the terminal width, hard-wrapping and
+	// garbling the whole UI.
 	if avail := m.width - 1; indW > avail {
 		ind = ansi.Truncate(ind, avail, "…")
 		indW = lipgloss.Width(ind)

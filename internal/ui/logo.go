@@ -1,7 +1,9 @@
-// Package ui — logo header rendered above the panel area.
+// Package ui — wordmark header rendered above the panel area.
 package ui
 
 import (
+	"fmt"
+	"image/color"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -9,126 +11,101 @@ import (
 	"github.com/fkallas/tubeamp/internal/theme"
 )
 
-// logoHeight is the number of rows the logo header occupies when visible. The
-// logo is an "amp with knobs" motif: a small amplifier face (a box-drawn cabinet
-// with a row of knobs and a speaker grille) on the left, the "tubeamp" wordmark
-// to its right, and a short underline rule beneath the wordmark — three rows.
-// Every layout calc that reserves logo rows derives its reservation from this
-// constant (see app.go View()).
-const logoHeight = 3
+// logoHeight is the number of rows the wordmark header occupies. The header is a
+// single row: the colour-cycling "tubeamp" wordmark in the top-left, with the
+// version tag and sign-in indicator right-aligned. Every layout calc that
+// reserves header rows derives its reservation from this constant (see app.go
+// View()).
+const logoHeight = 1
 
-// logoMinTermHeight is the minimum terminal height that enables the logo. Below
-// this value the logo is suppressed so the panel area is not squeezed. It tracks
-// logoHeight: with the fixed chrome (player bar + hint line = 7 rows, see
-// View()), a shown logo leaves height−7−logoHeight panel rows, and this
-// threshold keeps that minimum at 15 (25−7−3). Raise it in lockstep if
-// logoHeight ever grows. (Hiding the logo below the threshold gives those rows
-// back to the panels, so the panel area is never smaller than at the threshold.)
-const logoMinTermHeight = 25
+// logoMinTermHeight is the minimum terminal height that enables the header. The
+// panel area has a floor (the Library panel + a 6-row Playlists/Queue minimum =
+// 13 rows) and the fixed chrome is 7 rows (player bar + hint line), so the
+// smallest renderable terminal is minHeight (20) rows. Adding the 1-row header
+// needs one extra row of headroom, so the header is suppressed only at the very
+// shortest height (where it would not fit) and the panel area reclaims that row.
+const logoMinTermHeight = minHeight + logoHeight
 
-// appVersion is displayed in Muted style, right-aligned on the first logo row.
+// appVersion is displayed in Muted style, right-aligned on the header row.
 const appVersion = "v0.1.0"
 
-// Amp-face glyphs. Knobs come from the round-dial set; the grille is a run of
-// heavy verticals reading as a speaker grille. Each glyph is one cell wide and
-// the cabinet width is derived from the plain interior string (see renderLogo),
-// so the box border always lines up regardless of how the terminal sizes runes.
-const (
-	logoKnobPower = "◉" // leftmost knob, lit like a power LED (PlayingStyle)
-	logoKnobTone  = "◎" // tone dial (AccentStyle)
-	logoKnobGain  = "◉" // gain dial (AccentStyle)
-	logoGrille    = "┃┃┃"
-	logoWordmark  = "tubeamp"
-)
+// logoWordmark is the literal word drawn in the top-left. Each letter is tinted
+// with a theme-palette colour, and the colours cycle across the letters as the
+// animation phase advances (see renderWordmark).
+const logoWordmark = "tubeamp"
 
-// renderLogo returns the 3-row "amp with knobs" logo header, or "" when
-// termHeight is below logoMinTermHeight. Each row is padded to exactly termWidth
-// visible columns so the result slots cleanly above the panel area in a
-// JoinVertical.
-//
-// The motif is a small amplifier — a box-drawn cabinet with a row of knobs and a
-// speaker grille — with the wordmark to its right:
-//
-//	╭─────────────╮                       v0.1.0
-//	│ ◉ ◎ ◉ ┃┃┃ │  tubeamp
-//	╰─────────────╯  ───────              ● account
-//
-// Colours come strictly from theme tokens — the amp cabinet border in
-// AccentStyle, the power knob in PlayingStyle (so it glows) with the remaining
-// knobs in AccentStyle, the speaker grille + underline rule + version in Muted,
-// the wordmark in Primary. ZERO hardcoded colours.
-//
-// Row 1 — the amp's top edge, with "v0.1.0" in Muted right-aligned at the far
-// edge.
-// Row 2 — the amp face (knobs + grille) followed by the "tubeamp" wordmark.
-// Row 3 — the amp's bottom edge + a short Muted underline rule beneath the
-//
-//	wordmark; the already-styled sign-in indicator (when non-empty) is placed at
-//	the far right, ANSI-aware-truncated with an ellipsis when it would not fit (a
-//	long account name must clip, not vanish); plain spaces pad to termWidth.
-func renderLogo(th *theme.Theme, termWidth, termHeight int, indicator string) string {
-	if termHeight < logoMinTermHeight {
-		return ""
+// renderWordmark draws the "tubeamp" wordmark with each letter coloured from the
+// theme palette: letter i takes palette[(i+phase) % len(palette)], so advancing
+// the phase flows the colours across the word over time. Colours come strictly
+// from theme tokens — ZERO hardcoded hex. The visible width is always
+// len(logoWordmark) columns regardless of phase, so the layout never shifts.
+func renderWordmark(th *theme.Theme, phase int) string {
+	pal := th.Palette()
+	if len(pal) == 0 {
+		// No palette tokens parsed: fall back to the primary text style.
+		return th.Primary().Render(logoWordmark)
 	}
+	if phase < 0 {
+		phase = -phase
+	}
+	var b strings.Builder
+	for i, r := range logoWordmark {
+		c := pal[(i+phase)%len(pal)]
+		b.WriteString(lipgloss.NewStyle().Foreground(lipglossColor(c)).Render(string(r)))
+	}
+	return b.String()
+}
+
+// lipglossColor converts an image/color.Color (the form theme.Palette() returns)
+// to a lipgloss colour via its "#rrggbb" hex string.
+func lipglossColor(c color.Color) lipgloss.Color {
+	r, g, b, _ := c.RGBA()
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", uint8(r>>8), uint8(g>>8), uint8(b>>8)))
+}
+
+// renderLogo returns the single-row wordmark header padded to exactly termWidth
+// visible columns so it slots cleanly above the panel area in a JoinVertical: the
+// colour-cycling "tubeamp" wordmark on the left, then the Muted version tag and
+// the already-styled sign-in indicator right-aligned at the far edge (the
+// indicator's home today). phase drives the colour animation (see renderWordmark).
+//
+// A long account name must not silently drop the whole indicator nor widen the
+// row past termWidth (which would make JoinVertical pad every frame row and break
+// the full-width frame invariant): it is ANSI-aware-truncated with an ellipsis
+// to the columns left of the wordmark + version + the two gaps.
+func renderLogo(th *theme.Theme, termWidth, phase int, indicator string) string {
 	if termWidth <= 0 {
 		return ""
 	}
 
-	accent := th.AccentStyle()
-	muted := th.Muted()
+	word := renderWordmark(th, phase)
+	wordW := lipgloss.Width(word)
 
-	// Amp cabinet. The interior width is measured from the plain glyph run so the
-	// box rules line up no matter how the terminal sizes these runes; the styled
-	// face below reproduces the very same glyphs in the same order.
-	interior := " " + logoKnobPower + " " + logoKnobTone + " " + logoKnobGain + " " + logoGrille + " "
-	bar := strings.Repeat("─", lipgloss.Width(interior))
-	ampTop := accent.Render("╭" + bar + "╮")
-	ampBot := accent.Render("╰" + bar + "╯")
-	ampFace := accent.Render("│") +
-		" " + th.PlayingStyle().Render(logoKnobPower) +
-		" " + accent.Render(logoKnobTone) +
-		" " + accent.Render(logoKnobGain) +
-		" " + muted.Render(logoGrille) +
-		" " + accent.Render("│")
-	ampW := lipgloss.Width(ampTop) // == the visible width of every amp row
-
-	// ── Row 1 — amp top edge + version ───────────────────────────────────────
-	ver := muted.Render(appVersion)
+	ver := th.Muted().Render(appVersion)
 	verW := lipgloss.Width(ver)
-	var row1 string
-	if gap := termWidth - ampW - verW; gap >= 1 {
-		row1 = ampTop + strings.Repeat(" ", gap) + ver
-	} else {
-		// Terminal too narrow to show the version tag; just show the amp top.
-		row1 = logoPadRight(ampTop, termWidth)
+
+	// Right cluster: the version tag, then the sign-in indicator (when present)
+	// two columns to its right, the whole cluster pushed to the far edge.
+	right := ver
+	rightW := verW
+	if indicator != "" {
+		indW := lipgloss.Width(indicator)
+		// Clip an oversized indicator (ANSI-aware, ellipsis tail) so the row never
+		// exceeds termWidth: leave the wordmark + a 1-col gap + version + a 2-col
+		// gap before it.
+		if avail := termWidth - wordW - 1 - verW - 2; indW > avail && avail >= 2 {
+			indicator = ansi.Truncate(indicator, avail, "…")
+			indW = lipgloss.Width(indicator)
+		}
+		right = ver + "  " + indicator
+		rightW = verW + 2 + indW
 	}
 
-	// ── Row 2 — amp face + wordmark ──────────────────────────────────────────
-	row2 := logoPadRight(ampFace+"  "+th.Primary().Render(logoWordmark), termWidth)
-
-	// ── Row 3 — amp bottom edge + underline rule + sign-in indicator ─────────
-	// The rule underlines the wordmark (same width), two cols to the right of the
-	// cabinet so it sits directly beneath "tubeamp".
-	rule := ampBot + "  " + muted.Render(strings.Repeat("─", lipgloss.Width(logoWordmark)))
-	ruleW := lipgloss.Width(rule)
-	indW := lipgloss.Width(indicator)
-
-	// A long account name must not silently drop the whole indicator: clip it
-	// (ANSI-aware, ellipsis tail) to the columns left of the rule + 1-col gap.
-	if avail := termWidth - ruleW - 1; indicator != "" && indW > avail && avail >= 2 {
-		indicator = ansi.Truncate(indicator, avail, "…")
-		indW = lipgloss.Width(indicator)
+	if gap := termWidth - wordW - rightW; gap >= 1 {
+		return word + strings.Repeat(" ", gap) + right
 	}
-
-	var row3 string
-	if indicator != "" && ruleW+1+indW <= termWidth {
-		// Right-align the sign-in indicator at the far edge of the rule row.
-		row3 = rule + strings.Repeat(" ", termWidth-ruleW-indW) + indicator
-	} else {
-		row3 = logoPadRight(rule, termWidth)
-	}
-
-	return row1 + "\n" + row2 + "\n" + row3
+	// Terminal too narrow for the right cluster: just show the wordmark, padded.
+	return logoPadRight(word, termWidth)
 }
 
 // logoPadRight pads s with trailing spaces to exactly w visible columns (no-op

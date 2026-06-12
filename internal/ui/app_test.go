@@ -331,37 +331,59 @@ func TestQuit(t *testing.T) {
 	}
 }
 
-// TestLogoVisibleAtLargeTerminal asserts that the ASCII logo wordmark is present
-// in the rendered view when the terminal is tall enough (>= logoMinTermHeight).
+// TestLogoVisibleAtLargeTerminal asserts that the "tubeamp" wordmark is present
+// in the rendered view at a normal terminal size.
 func TestLogoVisibleAtLargeTerminal(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "tubeamp") {
-		t.Errorf("View(120×40) should show the logo wordmark; \"tubeamp\" not found in:\n%s", v)
+		t.Errorf("View(120×40) should show the wordmark; \"tubeamp\" not found in:\n%s", v)
 	}
 }
 
-// TestLogoWordmarkAndIndicator asserts the 3-row amp-and-knobs logo renders the
-// "tubeamp" wordmark, a knob glyph from the amp face, the right-aligned version,
-// AND that the sign-in indicator still rides the logo's rule row alongside it.
+// TestLogoWordmarkAndIndicator asserts the single-row header renders the
+// "tubeamp" wordmark and the right-aligned version, AND that the sign-in
+// indicator rides the same row alongside them.
 func TestLogoWordmarkAndIndicator(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"tubeamp", "◉", appVersion, "● Felipe Kallas"} {
+	for _, want := range []string{"tubeamp", appVersion, "● Felipe Kallas"} {
 		if !strings.Contains(v, want) {
-			t.Errorf("logo view missing %q in:\n%s", want, v)
+			t.Errorf("header view missing %q in:\n%s", want, v)
 		}
 	}
 }
 
-// TestLogoHiddenAtSmallTerminal asserts that the logo is suppressed when the
-// terminal height is below logoMinTermHeight — the wordmark must not appear.
-func TestLogoHiddenAtSmallTerminal(t *testing.T) {
-	m := newTestModel(t, 120, 22)
-	v := ansi.Strip(m.View())
-	if strings.Contains(v, "tubeamp") {
-		t.Errorf("View(120×22) should hide the logo; \"tubeamp\" unexpectedly found")
+// TestLogoTickAdvancesPhase asserts a logoTickMsg advances the colour-cycle phase
+// and re-arms the tick, and that the rendered view still holds (no panic, the
+// wordmark is intact and the dimensions are unchanged) afterwards.
+func TestLogoTickAdvancesPhase(t *testing.T) {
+	const w, h = 120, 40
+	m := newTestModel(t, w, h)
+	before := m.logoPhase
+
+	updated, cmd := m.Update(logoTickMsg{})
+	m = updated.(Model)
+	if m.logoPhase != before+1 {
+		t.Errorf("logoPhase = %d, want %d (advanced by one tick)", m.logoPhase, before+1)
+	}
+	if cmd == nil {
+		t.Error("logoTickMsg did not re-arm the animation tick")
+	}
+
+	v := m.View()
+	if !strings.Contains(ansi.Strip(v), "tubeamp") {
+		t.Errorf("wordmark missing after a tick:\n%s", ansi.Strip(v))
+	}
+	lines := strings.Split(v, "\n")
+	if len(lines) != h {
+		t.Fatalf("after tick: view has %d rows, want %d", len(lines), h)
+	}
+	for i, ln := range lines {
+		if got := lipgloss.Width(ln); got != w {
+			t.Errorf("after tick: line %d width = %d, want %d", i, got, w)
+		}
 	}
 }
 
@@ -571,47 +593,45 @@ func TestLateAlbumCoverIsCached(t *testing.T) {
 	}
 }
 
-// TestLogoVisibilityBoundary pins the logo's height boundary: visible at
-// exactly logoMinTermHeight, hidden one row below — and in both modes the
-// rendered view still totals exactly the terminal height with full-width rows
-// (the logoHeight logo rows are reclaimed by the panel area when hidden).
-func TestLogoVisibilityBoundary(t *testing.T) {
-	for _, tc := range []struct {
-		h       int
-		visible bool
-	}{
-		{logoMinTermHeight, true},      // first height that shows the logo
-		{logoMinTermHeight - 1, false}, // last height that hides it
+// TestLogoVisibleAtRequiredSizes pins the one-row wordmark header at the sizes
+// called out in the layout contract — 120×40, 100×30, and a short height — and
+// asserts the wordmark shows while the rendered view still totals exactly the
+// terminal height with full-width rows (the header never overflows or clips the
+// panel area).
+func TestLogoVisibleAtRequiredSizes(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{
+		{120, 40},
+		{100, 30},
+		{minWidth, 24}, // a short height (still above the header threshold)
 	} {
-		m := newTestModel(t, 120, tc.h)
+		m := newTestModel(t, tc.w, tc.h)
 		raw := m.View()
-		if got := strings.Contains(ansi.Strip(raw), "tubeamp"); got != tc.visible {
-			t.Errorf("h=%d: logo visible = %v, want %v", tc.h, got, tc.visible)
+		if !strings.Contains(ansi.Strip(raw), "tubeamp") {
+			t.Errorf("%dx%d: wordmark not shown", tc.w, tc.h)
 		}
 		lines := strings.Split(raw, "\n")
 		if len(lines) != tc.h {
-			t.Errorf("h=%d: view has %d rows, want exactly %d", tc.h, len(lines), tc.h)
+			t.Errorf("%dx%d: view has %d rows, want exactly %d", tc.w, tc.h, len(lines), tc.h)
 		}
 		for i, ln := range lines {
-			if got := lipgloss.Width(ln); got != 120 {
-				t.Errorf("h=%d: line %d width = %d, want 120", tc.h, i, got)
+			if got := lipgloss.Width(ln); got != tc.w {
+				t.Errorf("%dx%d: line %d width = %d, want %d", tc.w, tc.h, i, got, tc.w)
 				break
 			}
 		}
 	}
 }
 
-// TestLayoutInvariantAcrossHeights sweeps heights spanning the (taller, 3-row)
-// logo boundary and asserts the rendered view always totals exactly the terminal
-// height with full-width rows — i.e. the 3-row logo never makes the panel area
-// overflow or clip at the minimum sizes. The sign-in indicator is set to an
-// account name wider than the terminal, so the sweep also proves the indicator
-// truncates on BOTH of its homes: the logo rule row (logo shown) and the bottom
-// status row (logo hidden) — an unclipped indicator would widen one row and make
-// JoinVertical pad every row past the terminal width.
+// TestLayoutInvariantAcrossHeights sweeps heights and asserts the rendered view
+// always totals exactly the terminal height with full-width rows — i.e. the
+// one-row header never makes the panel area overflow or clip at the minimum
+// sizes. The sign-in indicator is set to an account name wider than the terminal,
+// so the sweep also proves the indicator truncates on the header row rather than
+// widening it (an unclipped indicator would make JoinVertical pad every row past
+// the terminal width and break the full-width frame invariant).
 func TestLayoutInvariantAcrossHeights(t *testing.T) {
-	for _, w := range []int{minWidth, 120} {
-		for h := minHeight; h <= logoMinTermHeight+3; h++ {
+	for _, w := range []int{minWidth, 100, 120} {
+		for h := minHeight; h <= minHeight+12; h++ {
 			m := newTestModel(t, w, h)
 			m = send(m, accountInfoMsg{name: strings.Repeat("N", 124), signedIn: true})
 			lines := strings.Split(m.View(), "\n")
@@ -626,6 +646,51 @@ func TestLayoutInvariantAcrossHeights(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestLogoVisibilityBoundary pins the header's height boundary: the wordmark is
+// shown at exactly logoMinTermHeight and suppressed one row below — and in both
+// modes the rendered view still totals exactly the terminal height with
+// full-width rows (the header row is reclaimed by the panel area when hidden).
+func TestLogoVisibilityBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		h       int
+		visible bool
+	}{
+		{logoMinTermHeight, true},      // first height that shows the wordmark
+		{logoMinTermHeight - 1, false}, // last height that hides it
+	} {
+		m := newTestModel(t, 120, tc.h)
+		raw := m.View()
+		if got := strings.Contains(ansi.Strip(raw), "tubeamp"); got != tc.visible {
+			t.Errorf("h=%d: wordmark visible = %v, want %v", tc.h, got, tc.visible)
+		}
+		lines := strings.Split(raw, "\n")
+		if len(lines) != tc.h {
+			t.Errorf("h=%d: view has %d rows, want exactly %d", tc.h, len(lines), tc.h)
+		}
+		for i, ln := range lines {
+			if got := lipgloss.Width(ln); got != 120 {
+				t.Errorf("h=%d: line %d width = %d, want 120", tc.h, i, got)
+				break
+			}
+		}
+	}
+}
+
+// TestAuthIndicatorInStatusRowWhenLogoHidden asserts that on the shortest
+// terminal (header hidden, just below logoMinTermHeight) the sign-in indicator
+// falls through to the bottom status line.
+func TestAuthIndicatorInStatusRowWhenLogoHidden(t *testing.T) {
+	m := newTestModel(t, 120, logoMinTermHeight-1) // header hidden
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "tubeamp") {
+		t.Fatalf("header should be hidden at height %d", logoMinTermHeight-1)
+	}
+	if !strings.Contains(v, "● Felipe Kallas") {
+		t.Errorf("indicator not shown in status row when header hidden:\n%s", v)
 	}
 }
 
@@ -685,20 +750,6 @@ func TestAuthIndicatorErrorStaysUnresolved(t *testing.T) {
 	}
 	if got := m.authIndicator(); got != "" {
 		t.Errorf("indicator after error = %q, want empty", got)
-	}
-}
-
-// TestAuthIndicatorInStatusRowWhenLogoHidden asserts that with the logo hidden
-// (short terminal) the indicator falls through to the bottom status line.
-func TestAuthIndicatorInStatusRowWhenLogoHidden(t *testing.T) {
-	m := newTestModel(t, 120, 22) // below logoMinTermHeight => logo hidden
-	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
-	v := ansi.Strip(m.View())
-	if strings.Contains(v, "tubeamp") {
-		t.Fatalf("logo should be hidden at height 22")
-	}
-	if !strings.Contains(v, "● Felipe Kallas") {
-		t.Errorf("indicator not shown in status row when logo hidden:\n%s", v)
 	}
 }
 
@@ -1098,10 +1149,10 @@ func TestLateSongsPreserveAlbumSelection(t *testing.T) {
 }
 
 // TestLogoIndicatorTruncatedAtNarrowWidth asserts a long account name clips
-// with an ellipsis on the logo rule row instead of the indicator vanishing
-// entirely (its only home when the logo is visible).
+// with an ellipsis on the wordmark header row instead of the indicator vanishing
+// entirely (its home when the header is visible).
 func TestLogoIndicatorTruncatedAtNarrowWidth(t *testing.T) {
-	m := newTestModel(t, 70, 40) // min width, logo visible
+	m := newTestModel(t, 70, 40) // min width, header visible
 	m = send(m, accountInfoMsg{name: strings.Repeat("N", 60), signedIn: true})
 	v := ansi.Strip(m.View())
 	if !strings.Contains(v, "● N") {

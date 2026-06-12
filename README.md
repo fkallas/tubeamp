@@ -5,6 +5,8 @@ A Lazygit-inspired terminal UI for YouTube Music, written in Go.
 Stacked, numbered panels on the left (Library / Playlists / Queue), a contextual
 main view on the right, a persistent player bar with pixel-art album covers, and
 number-key panel switching with arrow-key navigation. Themeable via simple YAML files.
+An animated **tubeamp** wordmark sits in the top-left, its letters cycling through
+the active theme's palette colours.
 
 The main view lists tracks as a table — title, artist, album, and duration —
 with the album column hidden automatically on narrow terminals.
@@ -189,7 +191,8 @@ it is missing.
 5. Paste it as a single line into `~/.local/share/tubeamp/auth` (create the
    directory if needed). No quotes, no `Cookie:` prefix — just the value.
 
-The header in the logo area then shows your live sign-in state:
+The header row (right-aligned, beside the wordmark) then shows your live sign-in
+state:
 
 - `● <name>`  — signed in (your account name)
 - `○ anonymous — cookie stale? see README`  — an auth file is present but
