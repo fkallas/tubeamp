@@ -75,9 +75,15 @@ type mainContent struct {
 	kind   mainKind
 	title  string
 	tracks []model.Track
-	albums []model.Album // mainSearch: the album results section
+	albums []model.Album // mainSearch: the rendered Albums section (merged, see below)
 	album  model.Album   // mainAlbum: the album being viewed
 	cursor int
+	// mainSearch Albums section is merged from two sources that arrive separately:
+	// derivedAlbums (reconstructed from the full-catalog song hits) shown FIRST,
+	// then verticalAlbums (the dedicated album-search vertical, degraded for
+	// anonymous sessions), deduped by BrowseID. albums holds the merged result.
+	derivedAlbums  []model.Album
+	verticalAlbums []model.Album
 	// searchGen ties a mainSearch frame to the search generation that produced
 	// it, so a later result (songs and albums arrive separately) updates the same
 	// frame instead of pushing a duplicate.
@@ -285,10 +291,11 @@ type artMsg struct {
 	err     error
 }
 type searchResultMsg struct {
-	gen    int
-	query  string
-	tracks []model.Track
-	err    error
+	gen           int
+	query         string
+	tracks        []model.Track
+	derivedAlbums []model.Album // albums reconstructed from the song hits (catalog-complete)
+	err           error
 }
 type albumSearchMsg struct {
 	gen    int
@@ -498,8 +505,8 @@ func searchCmd(c *ytm.Client, query string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		ts, err := c.Search(ctx, query)
-		return searchResultMsg{gen: gen, query: query, tracks: ts, err: err}
+		ts, albums, err := c.SearchWithAlbums(ctx, query)
+		return searchResultMsg{gen: gen, query: query, tracks: ts, derivedAlbums: albums, err: err}
 	}
 }
 
@@ -619,7 +626,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = ""
-		m.ensureSearchFrame(msg.query).tracks = msg.tracks
+		fr := m.ensureSearchFrame(msg.query)
+		fr.tracks = msg.tracks
+		fr.derivedAlbums = msg.derivedAlbums
+		fr.albums = mergeSearchAlbums(fr.derivedAlbums, fr.verticalAlbums)
 		return m, nil
 
 	case albumSearchMsg:
@@ -631,7 +641,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = ""
-		m.ensureSearchFrame(msg.query).albums = msg.albums
+		fr := m.ensureSearchFrame(msg.query)
+		fr.verticalAlbums = msg.albums
+		fr.albums = mergeSearchAlbums(fr.derivedAlbums, fr.verticalAlbums)
 		return m, nil
 
 	case albumLoadMsg:
@@ -1358,6 +1370,25 @@ func (m *Model) setMain(title string, tracks []model.Track) {
 // pushMain pushes a new track-list content frame onto the main-view stack.
 func (m *Model) pushMain(title string, tracks []model.Track) {
 	m.stack = append(m.stack, mainContent{title: title, tracks: tracks})
+}
+
+// mergeSearchAlbums builds the rendered Albums section: the albums derived from
+// the full-catalog song hits come first (they reflect releases the degraded
+// album vertical withholds from anonymous sessions), then the album-vertical
+// results, deduped by BrowseID. Order within each source is preserved.
+func mergeSearchAlbums(derived, vertical []model.Album) []model.Album {
+	seen := make(map[string]bool, len(derived)+len(vertical))
+	merged := make([]model.Album, 0, len(derived)+len(vertical))
+	for _, src := range [][]model.Album{derived, vertical} {
+		for _, a := range src {
+			if a.BrowseID == "" || seen[a.BrowseID] {
+				continue
+			}
+			seen[a.BrowseID] = true
+			merged = append(merged, a)
+		}
+	}
+	return merged
 }
 
 // ensureSearchFrame returns the search-results frame for the current search

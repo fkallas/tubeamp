@@ -1,0 +1,143 @@
+{
+  "contents": {
+    "tabbedSearchResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicShelfRenderer": {
+                      "contents": [
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "thumbnail": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {"url": "https://lh3.googleusercontent.com/one_small", "width": 60, "height": 60},
+                                    {"url": "https://lh3.googleusercontent.com/one_large", "width": 226, "height": 226}
+                                  ]
+                                }
+                              }
+                            },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Song One", "navigationEndpoint": {"watchEndpoint": {"videoId": "vidOne"}}}]}
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {"text": "The Band", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCband", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}},
+                                      {"text": " • "},
+                                      {"text": "Shared Album", "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_shared", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}}}}
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "3:00"}]}}}],
+                            "playlistItemData": {"videoId": "vidOne"}
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "thumbnail": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {"url": "https://lh3.googleusercontent.com/two_large", "width": 226, "height": 226}
+                                  ]
+                                }
+                              }
+                            },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Song Two", "navigationEndpoint": {"watchEndpoint": {"videoId": "vidTwo"}}}]}
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {"text": "Other Artist", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCother", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}},
+                                      {"text": " • "},
+                                      {"text": "Second Album", "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_second", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}}}}
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "4:00"}]}}}],
+                            "playlistItemData": {"videoId": "vidTwo"}
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "thumbnail": {
+                              "musicThumbnailRenderer": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {"url": "https://lh3.googleusercontent.com/three_large", "width": 226, "height": 226}
+                                  ]
+                                }
+                              }
+                            },
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Song Three", "navigationEndpoint": {"watchEndpoint": {"videoId": "vidThree"}}}]}
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {"text": "The Band", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCband", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}},
+                                      {"text": " • "},
+                                      {"text": "Shared Album", "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_shared", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}}}}
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "2:30"}]}}}],
+                            "playlistItemData": {"videoId": "vidThree"}
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": []}}},
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Song Four", "navigationEndpoint": {"watchEndpoint": {"videoId": "vidFour"}}}]}
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Single Artist", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCsingle", "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}}}}]}
+                                }
+                              }
+                            ],
+                            "fixedColumns": [{"musicResponsiveListItemFixedColumnRenderer": {"text": {"runs": [{"text": "1:50"}]}}}],
+                            "playlistItemData": {"videoId": "vidFour"}
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

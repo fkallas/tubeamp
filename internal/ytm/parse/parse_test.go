@@ -66,6 +66,87 @@ func TestSearchTracks_fixture(t *testing.T) {
 	}
 }
 
+func TestSearchResults_derivesAlbumsFromSongs(t *testing.T) {
+	data, err := os.ReadFile("testdata/search_songs.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	res, err := SearchResults(data)
+	if err != nil {
+		t.Fatalf("SearchResults: %v", err)
+	}
+
+	if len(res.Tracks) != 2 {
+		t.Fatalf("got %d tracks, want 2", len(res.Tracks))
+	}
+	if len(res.Albums) != 2 {
+		t.Fatalf("got %d derived albums, want 2", len(res.Albums))
+	}
+
+	// Album 0 is derived from track 0 (Rick Astley / Whenever You Need Somebody).
+	a0 := res.Albums[0]
+	if a0.BrowseID != "MPREb_kkop4QEjWXe" {
+		t.Errorf("album[0].BrowseID = %q, want %q", a0.BrowseID, "MPREb_kkop4QEjWXe")
+	}
+	if a0.Title != "Whenever You Need Somebody" {
+		t.Errorf("album[0].Title = %q, want the album name", a0.Title)
+	}
+	if len(a0.Artists) != 1 || a0.Artists[0] != "Rick Astley" {
+		t.Errorf("album[0].Artists = %v, want [Rick Astley] (the song's artists)", a0.Artists)
+	}
+	if a0.ThumbURL != "https://lh3.googleusercontent.com/large" {
+		t.Errorf("album[0].ThumbURL = %q, want the song thumb as stand-in", a0.ThumbURL)
+	}
+	if a0.Year != "" {
+		t.Errorf("album[0].Year = %q, want empty (GetAlbum fills it later)", a0.Year)
+	}
+
+	if res.Albums[1].BrowseID != "MPREb_LoGXcQ" {
+		t.Errorf("album[1].BrowseID = %q, want %q", res.Albums[1].BrowseID, "MPREb_LoGXcQ")
+	}
+}
+
+func TestSearchResults_dedupesAlbums(t *testing.T) {
+	data, err := os.ReadFile("testdata/search_songs_albumrefs.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	res, err := SearchResults(data)
+	if err != nil {
+		t.Fatalf("SearchResults: %v", err)
+	}
+
+	// Four songs: two share MPREb_shared, one has MPREb_second, one has no album.
+	if len(res.Tracks) != 4 {
+		t.Fatalf("got %d tracks, want 4", len(res.Tracks))
+	}
+	// Deduped by BrowseID, first-seen order: [MPREb_shared, MPREb_second].
+	if len(res.Albums) != 2 {
+		t.Fatalf("got %d derived albums, want 2 (deduped)", len(res.Albums))
+	}
+	if res.Albums[0].BrowseID != "MPREb_shared" {
+		t.Errorf("album[0].BrowseID = %q, want MPREb_shared (first seen)", res.Albums[0].BrowseID)
+	}
+	if res.Albums[1].BrowseID != "MPREb_second" {
+		t.Errorf("album[1].BrowseID = %q, want MPREb_second", res.Albums[1].BrowseID)
+	}
+	if res.Albums[0].Title != "Shared Album" {
+		t.Errorf("album[0].Title = %q, want Shared Album", res.Albums[0].Title)
+	}
+}
+
+func TestSearchResults_empty(t *testing.T) {
+	res, err := SearchResults([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("SearchResults on empty object: %v", err)
+	}
+	if len(res.Tracks) != 0 || len(res.Albums) != 0 {
+		t.Errorf("got %d tracks / %d albums, want 0/0", len(res.Tracks), len(res.Albums))
+	}
+}
+
 func TestSearchTracks_empty(t *testing.T) {
 	tracks, err := SearchTracks([]byte(`{}`))
 	if err != nil {

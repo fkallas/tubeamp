@@ -725,3 +725,76 @@ func TestSearchResultsRenderBothSections(t *testing.T) {
 		}
 	}
 }
+
+// TestDerivedAlbumsOrderedFirstAndDeduped pins the album-fallback merge: albums
+// derived from the full-catalog song hits come first, then the album-vertical
+// results, deduped by BrowseID — regardless of which response lands first.
+func TestDerivedAlbumsOrderedFirstAndDeduped(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	ts := []model.Track{{VideoID: "v1", Title: "S1", Artists: []string{"A"}, Album: "Derived First", Duration: time.Minute}}
+	derived := model.Album{BrowseID: "MPRE_derived", Title: "Derived First", Artists: []string{"A"}}
+	dup := model.Album{BrowseID: "MPRE_derived", Title: "Derived First (vertical dup)", Artists: []string{"A"}}
+	vertical := model.Album{BrowseID: "MPRE_vertical", Title: "Vertical Only", Artists: []string{"B"}, Year: "2000"}
+
+	m.searchGen = 9
+	// The albums vertical arrives FIRST (out of order)…
+	m = send(m, albumSearchMsg{gen: 9, query: "q", albums: []model.Album{dup, vertical}})
+	// …then the songs (carrying derived albums) arrive.
+	m = send(m, searchResultMsg{gen: 9, query: "q", tracks: ts, derivedAlbums: []model.Album{derived}})
+
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainSearch {
+		t.Fatalf("top frame kind = %v, want mainSearch", top.kind)
+	}
+	got := top.albums
+	if len(got) != 2 {
+		t.Fatalf("merged albums = %d, want 2 (deduped by BrowseID)", len(got))
+	}
+	if got[0].BrowseID != "MPRE_derived" {
+		t.Errorf("albums[0].BrowseID = %q, want MPRE_derived first (derived-from-songs ordered first)", got[0].BrowseID)
+	}
+	if got[0].Title != "Derived First" {
+		t.Errorf("albums[0].Title = %q, want the derived ref kept over the vertical dup", got[0].Title)
+	}
+	if got[1].BrowseID != "MPRE_vertical" {
+		t.Errorf("albums[1].BrowseID = %q, want MPRE_vertical second", got[1].BrowseID)
+	}
+}
+
+// TestGetAlbumFromDerivedAlbumWithEmptyYear verifies a derived album (empty Year)
+// renders without an empty "()" segment and that opening it (GetAlbum) fills the
+// year on the album view — the fallback must not regress the album flow.
+func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	derived := model.Album{BrowseID: "MPREb_derived", Title: "Derived Album", Artists: []string{"Some Artist"}, ThumbURL: "https://lh3.googleusercontent.com/x"}
+	ts := []model.Track{{VideoID: "v1", Title: "Track A", Artists: []string{"Some Artist"}, Album: "Derived Album", Duration: 3 * time.Minute}}
+
+	m.searchGen = 5
+	m = send(m, searchResultMsg{gen: 5, query: "derived", tracks: ts, derivedAlbums: []model.Album{derived}})
+
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "Derived Album") {
+		t.Fatalf("search view missing derived album title:\n%s", v)
+	}
+	if strings.Contains(v, "()") {
+		t.Errorf("derived album with empty Year rendered an empty () segment:\n%s", v)
+	}
+
+	// Move the cursor onto the album row (one song, so the first album is index 1).
+	m.stack[len(m.stack)-1].cursor = len(ts)
+	cmd := m.handleOpen()
+	if cmd == nil {
+		t.Fatal("handleOpen returned nil cmd for a derived album row")
+	}
+
+	// Simulate the GetAlbum result filling in the year the derived ref lacked.
+	full := model.Album{BrowseID: "MPREb_derived", Title: "Derived Album", Artists: []string{"Some Artist"}, Year: "1999"}
+	m = send(m, albumLoadMsg{gen: m.albumGen, open: true, title: "Derived Album", album: full, tracks: ts})
+
+	av := ansi.Strip(m.View())
+	if !strings.Contains(av, "Derived Album") || !strings.Contains(av, "1999") {
+		t.Errorf("album view missing title/year after GetAlbum:\n%s", av)
+	}
+}

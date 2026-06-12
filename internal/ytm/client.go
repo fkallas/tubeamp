@@ -144,6 +144,39 @@ func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error
 	return tracks, nil
 }
 
+// SearchWithAlbums runs a single song search and returns both the song tracks
+// and the album references derived from those song rows. It exists to bypass the
+// degraded album-search vertical YouTube serves to non-browser sessions (only
+// self-distributed releases; majors withheld): song search is full-catalog and
+// every song result carries its album's MPRE… browseId, so the albums can be
+// reconstructed from the songs. The derived albums have BrowseID, Title, Artists
+// and ThumbURL set but no Year (GetAlbum fills that on open). It costs one
+// request — the same one Search makes.
+func (c *Client) SearchWithAlbums(ctx context.Context, query string) ([]model.Track, []model.Album, error) {
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"query":  query,
+		"params": songsFilterParams,
+	}
+
+	raw, err := c.post(ctx, "search", payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ytm.SearchWithAlbums: %w", err)
+	}
+
+	res, err := parse.SearchResults(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ytm.SearchWithAlbums: %w", err)
+	}
+	return res.Tracks, res.Albums, nil
+}
+
 // SearchAlbums queries YouTube Music for albums matching query and returns the
 // parsed album list. It uses the albums-only InnerTube filter params.
 func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) {

@@ -12,13 +12,28 @@ import (
 	"github.com/fkallas/tubeamp/internal/model"
 )
 
-// SearchTracks parses the raw JSON response from InnerTube search and returns
-// the song tracks found. Items without a videoId are silently skipped. The
-// function never panics on malformed input.
-func SearchTracks(raw []byte) ([]model.Track, error) {
+// SearchResult bundles a song-search response: the song tracks plus the album
+// references derived from those same song rows. The derived albums exist to work
+// around YouTube serving a degraded album-search vertical to non-browser
+// sessions (majors withheld); each full-catalog song result still carries its
+// album's MPRE… browseId, so the albums can be reconstructed from the songs.
+type SearchResult struct {
+	Tracks []model.Track
+	Albums []model.Album // album refs derived from the song rows, deduped by BrowseID
+}
+
+// SearchResults parses the raw JSON response from InnerTube song search and
+// returns both the song tracks and the album references carried by those rows.
+// Each song row whose album flex-column run links to an MPRE… album browseId
+// contributes one album ref (BrowseID, Title = album name, Artists = the song's
+// artists, ThumbURL = the song thumb as a stand-in; Year is left empty — the
+// album page fills it on open). Albums are deduped by BrowseID, in first-seen
+// order. Items without a videoId are silently skipped; the function never panics
+// on malformed input.
+func SearchResults(raw []byte) (SearchResult, error) {
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return nil, fmt.Errorf("parse.SearchTracks: %w", err)
+		return SearchResult{}, fmt.Errorf("parse.SearchResults: %w", err)
 	}
 
 	// Navigate: contents -> tabbedSearchResultsRenderer -> tabs[0] ->
@@ -52,7 +67,8 @@ func SearchTracks(raw []byte) ([]model.Track, error) {
 		}
 	}
 
-	var tracks []model.Track
+	var res SearchResult
+	seen := make(map[string]bool)
 	for _, item := range shelfContents {
 		itemMap := asMap(item)
 		renderer := asMap(getPath(itemMap, "musicResponsiveListItemRenderer"))
@@ -63,9 +79,39 @@ func SearchTracks(raw []byte) ([]model.Track, error) {
 		if !ok {
 			continue
 		}
-		tracks = append(tracks, t)
+		res.Tracks = append(res.Tracks, t)
+
+		// Derive an album ref from this song row's album flex column.
+		flexCols := getSlice(getPath(renderer, "flexColumns"))
+		browseID, title := extractAlbumRef(flexCols)
+		if browseID == "" || seen[browseID] {
+			continue
+		}
+		seen[browseID] = true
+		if title == "" {
+			title = t.Album
+		}
+		res.Albums = append(res.Albums, model.Album{
+			BrowseID: browseID,
+			Title:    title,
+			Artists:  t.Artists,
+			ThumbURL: t.ThumbURL,
+			// Year intentionally left empty: GetAlbum fills it on open/play.
+		})
 	}
-	return tracks, nil
+	return res, nil
+}
+
+// SearchTracks parses the raw JSON response from InnerTube search and returns
+// the song tracks found. It is a thin wrapper over SearchResults for callers
+// that need only the tracks. Items without a videoId are silently skipped; the
+// function never panics on malformed input.
+func SearchTracks(raw []byte) ([]model.Track, error) {
+	res, err := SearchResults(raw)
+	if err != nil {
+		return nil, err
+	}
+	return res.Tracks, nil
 }
 
 // parseItem extracts a model.Track from a musicResponsiveListItemRenderer map.
@@ -182,6 +228,34 @@ func extractArtistsAlbum(flexCols []any) (artists []string, album string) {
 		}
 	}
 	return artists, album
+}
+
+// extractAlbumRef finds the album browse reference carried by a song row: the
+// flexColumn 1 run whose browseEndpoint is an album (pageType
+// MUSIC_PAGE_TYPE_ALBUM) with an MPRE… browseId. Returns (browseID, albumName),
+// or ("", "") when the row links to no such album.
+func extractAlbumRef(flexCols []any) (browseID, title string) {
+	if len(flexCols) < 2 {
+		return "", ""
+	}
+	runs := getSlice(getPath(asMap(flexCols[1]),
+		"musicResponsiveListItemFlexColumnRenderer", "text", "runs"))
+	for _, run := range runs {
+		runMap := asMap(run)
+		browseEP := asMap(getPath(runMap, "navigationEndpoint", "browseEndpoint"))
+		if browseEP == nil {
+			continue
+		}
+		id := str(getPath(browseEP, "browseId"))
+		pageType := str(getPath(browseEP,
+			"browseEndpointContextSupportedConfigs",
+			"browseEndpointContextMusicConfig",
+			"pageType"))
+		if pageType == "MUSIC_PAGE_TYPE_ALBUM" && strings.HasPrefix(id, "MPRE") {
+			return id, str(getPath(runMap, "text"))
+		}
+	}
+	return "", ""
 }
 
 // extractDuration parses duration from fixedColumns[0] text first; falls back

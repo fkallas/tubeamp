@@ -29,11 +29,15 @@ remaining Library sections (Albums/Artists/Songs/History) are still mock.
 
 Note: anonymous InnerTube **album** search only surfaces self-distributed
 releases — YouTube withholds the major-label catalog from logged-out clients
-(ytmusicapi behaves identically). Song search is unaffected. Signing in is
-supported (see [Signing in](#signing-in)) and tubeamp now shows your live
-sign-in state in the header; be aware that cookies copied from a logged-in
-browser frequently resolve as **anonymous** anyway, because Google rotates them
-within hours (see the cookie-rotation note below).
+(ytmusicapi behaves identically). Song search is unaffected, so tubeamp works
+around it: every song result carries its album's browseId, so the Albums section
+is reconstructed from the (full-catalog) song hits and shown first, with the
+degraded album-vertical results merged in after and deduped. Major-label albums
+therefore show up in search even anonymously. Signing in is supported (see
+[Signing in](#signing-in)) and tubeamp now shows your live sign-in state in the
+header; be aware that cookies copied from a logged-in browser frequently resolve
+as **anonymous** anyway, because Google rotates them within hours (see the
+cookie-rotation note below).
 
 ## Requirements
 

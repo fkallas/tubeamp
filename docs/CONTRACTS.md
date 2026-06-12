@@ -310,7 +310,11 @@ func NewClient(a *Auth) *Client // a may be nil => unauthenticated (search still
 func (c *Client) SetAuthUser(n int)     // X-Goog-AuthUser index for multi-account (clamped >=0)
 func (c *Client) Authenticated() bool   // an auth cookie was loaded (NOT a live sign-in check)
 func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error)       // songs filter
-func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter
+func (c *Client) SearchWithAlbums(ctx context.Context, query string) (tracks []model.Track, derivedAlbums []model.Album, err error)
+                                                  // one request, songs filter; derivedAlbums are the album refs
+                                                  // carried by the song rows (full-catalog), bypassing the degraded
+                                                  // album vertical. Year is empty until GetAlbum is opened.
+func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter (dedicated vertical)
 func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error)
                                                   // browse endpoint {browseId: ...}; sets Album.BrowseID = browseID
 
@@ -334,7 +338,18 @@ func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, e
                                                   // ("", false, nil) (a result, not an error). HTTP errors => err.
 
 // package ytm/parse — ALL response JSON parsing lives here, fixture-tested.
-func SearchTracks(raw []byte) ([]model.Track, error)                  // songs search shelf
+
+// SearchResult bundles a song-search response: the tracks plus the album refs
+// derived from those same song rows (each full-catalog song carries its album's
+// MPRE… browseId). Derived albums work around YouTube's degraded album-search
+// vertical for anonymous sessions.
+type SearchResult struct { Tracks []model.Track; Albums []model.Album }
+
+func SearchResults(raw []byte) (SearchResult, error) // songs shelf: tracks + album refs derived from the
+                                                  // song rows (Album: BrowseID + Title from the MPRE… album
+                                                  // run, Artists = song artists, ThumbURL = song thumb,
+                                                  // Year empty), deduped by BrowseID in first-seen order
+func SearchTracks(raw []byte) ([]model.Track, error)                  // thin wrapper over SearchResults (tracks only)
 func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums search shelf + top-result card
 func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
 func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account/account_menu menu (both shapes)
@@ -352,8 +367,11 @@ func PlaylistTracks(raw []byte) ([]model.Track, error)     // playlist/Liked-Son
 
 Response shapes change under us; parsers must tolerate missing keys. Mark the
 songs-/albums-filter `params` constants with a `// TODO: verify against ytmusicapi`
-comment. Parser fixtures in `parse/testdata/` (`search_albums.json`,
-`album_page.json`) are trimmed live captures; `album_page_detail.json` is
+comment. Parser fixtures in `parse/testdata/` (`search_songs.json`,
+`search_albums.json`, `album_page.json`) are trimmed live captures;
+`search_songs_albumrefs.json` is handcrafted to exercise `SearchResults`'
+derived-album dedup (two song rows share one MPRE… album, one row has no album);
+`album_page_detail.json` is
 handcrafted to exercise the older `musicDetailHeaderRenderer` shape.
 `account_signed_in.json` / `account_logged_out.json` are handcrafted to exercise
 both `AccountInfo` shapes (with and without `activeAccountHeaderRenderer`).
@@ -427,9 +445,16 @@ the Queue panel is ~34 cols or wider; otherwise the row is unchanged.
 The main view is a stack of frames; a frame is one of three kinds:
 - **track list** (library/playlist/single search-song play) — the table above.
 - **search results** (`panels.SearchView`) — a Muted "Songs" header + the track
-  table, then a Muted "Albums" header + album rows `▤ <Title> — <Artists> (<Year>)`.
-  A single selection cursor runs through both sections (songs first, then albums)
-  so `j`/`k` move through them seamlessly.
+  table, then a Muted "Albums" header + album rows `▤ <Title> — <Artists> (<Year>)`
+  (the `(<Year>)` segment is omitted when empty, e.g. for derived albums). A single
+  selection cursor runs through both sections (songs first, then albums) so `j`/`k`
+  move through them seamlessly. The Albums section is **merged** from two sources:
+  albums *derived from the song hits* (`SearchWithAlbums`, full catalog) come FIRST,
+  then the dedicated albums-vertical results (`SearchAlbums`, degraded for anonymous
+  sessions), deduped by BrowseID. The two responses arrive separately and the
+  merge is recomputed as each lands; both `enter` (play album) and `o` (album view)
+  drive `GetAlbum` off the row's BrowseID, so a derived album's empty Year/ThumbURL
+  fill in when it is opened.
 - **album view** (`panels.AlbumView`) — a header row with a large
   `panels.AlbumCoverCols`×`panels.AlbumCoverRows` (16×8) pixel-art cover on the
   left and the album title (Accent), artists, year + track count (Muted) to its
@@ -496,10 +521,12 @@ func listenPlayer(p *player.Player) tea.Cmd {
 - Theme picker overlay: lists `theme.List(config.ThemesDir())`, live-previews
   on cursor move, `enter` = keep + `cfg.Save()` (via Cmd), `esc` = revert.
 - Search overlay: `bubbles/textinput`; on enter, if ytm client non-nil run
-  `Search` and `SearchAlbums` Cmds concurrently (`tea.Batch`, both 5s timeout
+  `SearchWithAlbums` (songs + albums derived from the song rows) and `SearchAlbums`
+  (the dedicated albums vertical) Cmds concurrently (`tea.Batch`, both 5s timeout
   ctx) → results become a search-results frame (Songs + Albums sections); render
-  whichever returns first, fill the other section on arrival; on error or nil
-  client, status-line message.
+  whichever returns first, fill the other section on arrival. The Albums section
+  merges derived-from-songs albums first, then the vertical results, deduped by
+  BrowseID. On error or nil client, status-line message.
 - Album cover (album view): fetch via Cmd from `RewriteThumbURL(thumb, 64)`,
   render 16×8 with the same `artOptions()`/`artKey` scheme as the player bar,
   `Placeholder` while loading.
