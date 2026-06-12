@@ -114,6 +114,7 @@ func run(cfg *config.Config, themeOverride string) error {
 		auth = a
 	}
 	client := ytm.NewClient(auth)
+	client.SetAuthUser(cfg.AuthUser)
 
 	q := core.NewQueue()
 

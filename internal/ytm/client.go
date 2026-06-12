@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/fkallas/tubeamp/internal/model"
@@ -31,17 +32,36 @@ const (
 
 // Client is an authenticated or unauthenticated InnerTube client for YouTube Music.
 type Client struct {
-	hc   *http.Client
-	auth *Auth
+	hc       *http.Client
+	auth     *Auth
+	authUser int // X-Goog-AuthUser account index (config auth_user)
 }
 
 // NewClient creates a new Client. a may be nil for unauthenticated access;
-// search still works without authentication.
+// search still works without authentication. The account index defaults to 0;
+// override it with SetAuthUser for people logged into multiple Google accounts.
 func NewClient(a *Auth) *Client {
 	return &Client{
 		hc:   &http.Client{Timeout: 10 * time.Second},
 		auth: a,
 	}
+}
+
+// SetAuthUser sets the X-Goog-AuthUser account index sent on authenticated
+// requests. It selects which of several signed-in Google accounts to act as
+// (0 = the first/default account).
+func (c *Client) SetAuthUser(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.authUser = n
+}
+
+// Authenticated reports whether the client carries credentials (an auth cookie
+// was loaded). A stale cookie may still resolve as anonymous on YouTube's side,
+// so use AccountInfo to confirm the live sign-in state.
+func (c *Client) Authenticated() bool {
+	return c.auth != nil
 }
 
 // post sends a JSON POST to https://music.youtube.com/youtubei/v1/<endpoint>
@@ -71,7 +91,7 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 		}
 		req.Header.Set("Cookie", c.auth.Cookie)
 		req.Header.Set("Authorization", sapisidHash(sapisid, ytmOrigin, time.Now()))
-		req.Header.Set("X-Goog-AuthUser", "0")
+		req.Header.Set("X-Goog-AuthUser", strconv.Itoa(c.authUser))
 	}
 
 	resp, err := c.hc.Do(req)
@@ -177,4 +197,37 @@ func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []
 	}
 	album.BrowseID = browseID
 	return album, tracks, nil
+}
+
+// AccountInfo queries the InnerTube account menu (the account/account_menu
+// endpoint) and reports the signed-in account. signedIn is true when YouTube
+// returns the signed-in menu — an activeAccountHeaderRenderer — and name is its
+// account display name. A logged-out menu (no such renderer) returns
+// ("", false, nil): that is a valid result, not an error. HTTP and transport
+// failures return a non-nil error.
+//
+// Because Google rotates session cookies, a copied cookie can resolve as
+// anonymous (logged-out menu) even though an auth file is present; this method
+// is how tubeamp detects that stale-cookie case.
+func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, err error) {
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+	}
+
+	raw, err := c.post(ctx, "account/account_menu", payload)
+	if err != nil {
+		return "", false, fmt.Errorf("ytm.AccountInfo: %w", err)
+	}
+
+	name, signedIn, err = parse.AccountInfo(raw)
+	if err != nil {
+		return "", false, fmt.Errorf("ytm.AccountInfo: %w", err)
+	}
+	return name, signedIn, nil
 }

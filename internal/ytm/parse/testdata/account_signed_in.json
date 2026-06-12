@@ -1,0 +1,44 @@
+{
+  "responseContext": {},
+  "actions": [
+    {
+      "openPopupAction": {
+        "popup": {
+          "multiPageMenuRenderer": {
+            "header": {
+              "activeAccountHeaderRenderer": {
+                "accountName": {
+                  "runs": [
+                    { "text": "Felipe Kallas" }
+                  ]
+                },
+                "email": {
+                  "runs": [
+                    { "text": "user@example.com" }
+                  ]
+                },
+                "accountPhoto": {
+                  "thumbnails": [
+                    { "url": "https://lh3.googleusercontent.com/a/photo=s88", "width": 88, "height": 88 }
+                  ]
+                },
+                "channelHandle": {
+                  "runs": [
+                    { "text": "@felipekallas" }
+                  ]
+                }
+              }
+            },
+            "sections": [
+              {
+                "multiPageMenuSectionRenderer": {
+                  "items": []
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

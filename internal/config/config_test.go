@@ -21,6 +21,56 @@ func TestDefault(t *testing.T) {
 	if cfg.YTDLFormat != "bestaudio" {
 		t.Errorf("Default YTDLFormat: got %q, want %q", cfg.YTDLFormat, "bestaudio")
 	}
+	if cfg.AuthUser != 0 {
+		t.Errorf("Default AuthUser: got %d, want 0", cfg.AuthUser)
+	}
+}
+
+// TestLoadAuthUser asserts auth_user round-trips through the YAML, while a config
+// that omits it falls back to the 0 default.
+func TestLoadAuthUser(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	configDir := filepath.Join(tmpDir, "tubeamp")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_user: 2\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.AuthUser != 2 {
+		t.Errorf("AuthUser: got %d, want 2", cfg.AuthUser)
+	}
+}
+
+// TestLoadAuthUserDefault confirms a config without auth_user keeps the 0 default.
+func TestLoadAuthUserDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	configDir := filepath.Join(tmpDir, "tubeamp")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("theme: nord\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.AuthUser != 0 {
+		t.Errorf("AuthUser (unset): got %d, want 0", cfg.AuthUser)
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {

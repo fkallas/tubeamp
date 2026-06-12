@@ -156,6 +156,15 @@ type Model struct {
 	// Transient status / toast line.
 	status    string
 	statusErr bool
+
+	// Sign-in indicator (one-shot AccountInfo check). hasAuth records whether an
+	// auth file was loaded (the client carries a cookie); authChecked flips once
+	// the AccountInfo Cmd has resolved without error, with authSignedIn/authName
+	// holding the live result.
+	hasAuth      bool
+	authChecked  bool
+	authSignedIn bool
+	authName     string
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -180,6 +189,7 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		albumArtCache:    map[string]string{},
 		albumArtInflight: map[string]struct{}{},
 		volume:           cfg.Volume,
+		hasAuth:          c != nil && c.Authenticated(),
 	}
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
@@ -232,6 +242,11 @@ func (m Model) Init() tea.Cmd {
 	if m.hasNow && m.nowPlaying.ThumbURL != "" {
 		m.artInflight[m.nowPlaying.VideoID] = struct{}{}
 		cmds = append(cmds, artFetchCmd(m.nowPlaying))
+	}
+	// One-shot sign-in check: surfaces the account name (or a stale-cookie
+	// warning) in the logo/status area. No re-check is issued.
+	if m.c != nil {
+		cmds = append(cmds, accountInfoCmd(m.c))
 	}
 	return tea.Batch(cmds...)
 }
@@ -297,6 +312,15 @@ type themesLoadedMsg struct {
 type statusMsg struct {
 	text  string
 	isErr bool
+}
+
+// accountInfoMsg carries the one-shot AccountInfo result. signedIn + name come
+// straight from the InnerTube account menu; err is set when the check could not
+// run (network down), in which case the indicator stays unresolved.
+type accountInfoMsg struct {
+	name     string
+	signedIn bool
+	err      error
 }
 
 // listenPlayer receives one player event per command and is re-issued after
@@ -394,6 +418,18 @@ func artFetchCmd(t model.Track) tea.Cmd {
 		defer cancel()
 		img, err := art.Fetch(ctx, url)
 		return artMsg{videoID: vid, img: img, err: err}
+	}
+}
+
+// accountInfoCmd runs the one-shot sign-in check. It is bounded by a short
+// timeout so a dead network resolves quickly into an err (indicator stays
+// unresolved) rather than hanging.
+func accountInfoCmd(c *ytm.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		name, signedIn, err := c.AccountInfo(ctx)
+		return accountInfoMsg{name: name, signedIn: signedIn, err: err}
 	}
 }
 
@@ -591,6 +627,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus(msg.text)
 		}
+		return m, nil
+
+	case accountInfoMsg:
+		// A failed check (network down) leaves the indicator unresolved rather
+		// than flashing a spurious "anonymous"; it is a one-shot, never retried.
+		if msg.err != nil {
+			return m, nil
+		}
+		m.authChecked = true
+		m.authSignedIn = msg.signedIn
+		m.authName = msg.name
 		return m, nil
 	}
 
@@ -1282,6 +1329,29 @@ func (m Model) albumCoverBlock(a model.Album) string {
 func (m *Model) setStatus(s string) { m.status, m.statusErr = s, false }
 func (m *Model) setError(s string)  { m.status, m.statusErr = s, true }
 
+// authIndicator returns the styled sign-in status shown at the right end of the
+// logo row (or the status line when the logo is hidden), or "" before the
+// one-shot AccountInfo check has resolved. Signed in => "● <name>" in
+// PlayingStyle; an auth file that resolves anonymous (a stale cookie) =>
+// "○ anonymous — cookie stale? see README" in Muted; no auth file at all =>
+// "○ not signed in" in Muted.
+func (m Model) authIndicator() string {
+	if !m.authChecked {
+		return ""
+	}
+	if m.authSignedIn {
+		name := m.authName
+		if name == "" {
+			name = "signed in"
+		}
+		return m.th.PlayingStyle().Render("● " + name)
+	}
+	if m.hasAuth {
+		return m.th.Muted().Render("○ anonymous — cookie stale? see README")
+	}
+	return m.th.Muted().Render("○ not signed in")
+}
+
 func indexOf(names []string, want string) int {
 	for i, n := range names {
 		if n == want {
@@ -1299,8 +1369,11 @@ func (m Model) View() string {
 		return m.tooSmall()
 	}
 
-	// Logo header: 2 rows when terminal is tall enough, otherwise hidden.
-	logo := renderLogo(m.th, m.width, m.height)
+	// Logo header: 2 rows when terminal is tall enough, otherwise hidden. The
+	// sign-in indicator rides the right end of the logo's rule row; when the logo
+	// is hidden it falls through to the status line instead (see bottomLine).
+	ind := m.authIndicator()
+	logo := renderLogo(m.th, m.width, m.height, ind)
 	logoOff := 0
 	if logo != "" {
 		logoOff = logoHeight
@@ -1343,7 +1416,7 @@ func (m Model) View() string {
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, mainBox)
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
-	hint := m.bottomLine()
+	hint := m.statusRow(logo != "", ind)
 
 	// Assemble: optional logo header then panels, player bar, hints.
 	parts := make([]string, 0, 4)
@@ -1390,22 +1463,41 @@ func (m Model) tooSmall() string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, msg)
 }
 
-// bottomLine renders the single-line status/hint bar. A transient status toast
-// takes precedence over the context hints.
-func (m Model) bottomLine() string {
+// statusRow renders the bottom status/hint line. When the logo is hidden the
+// sign-in indicator is right-aligned onto this line (its natural home, the logo
+// rule row, is gone); otherwise the line is just the hint/toast content.
+func (m Model) statusRow(logoShown bool, ind string) string {
+	if logoShown || ind == "" {
+		return m.bottomLine(m.width)
+	}
+	indW := lipgloss.Width(ind)
+	left := m.bottomLine(m.width - indW - 1)
+	gap := m.width - lipgloss.Width(left) - indW
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + ind
+}
+
+// bottomLine renders the single-line status/hint bar, clipped to maxW columns.
+// A transient status toast takes precedence over the context hints.
+func (m Model) bottomLine(maxW int) string {
+	if maxW < 0 {
+		maxW = 0
+	}
 	if m.status != "" {
 		st := m.th.AccentStyle()
 		if m.statusErr {
 			st = m.th.ErrorStyle()
 		}
-		return st.Render(panels.Clip(" "+m.status, m.width))
+		return st.Render(panels.Clip(" "+m.status, maxW))
 	}
 	var parts []string
 	for _, h := range m.contextHints() {
 		parts = append(parts, h.key+" "+h.desc)
 	}
 	line := " " + strings.Join(parts, "  ·  ")
-	return m.th.Muted().Render(panels.Clip(line, m.width))
+	return m.th.Muted().Render(panels.Clip(line, maxW))
 }
 
 type hint struct{ key, desc string }

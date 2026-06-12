@@ -28,8 +28,10 @@ const appVersion = "v0.1.0"
 //
 // Row 2  — "╰─╯" in accent + a short decorative rule in Muted (up to ~28
 //
-//	cols), padded to termWidth with plain spaces.
-func renderLogo(th *theme.Theme, termWidth, termHeight int) string {
+//	cols); the already-styled sign-in indicator (when non-empty and it
+//	fits) is placed at the far right, otherwise plain spaces pad to
+//	termWidth.
+func renderLogo(th *theme.Theme, termWidth, termHeight int, indicator string) string {
 	if termHeight < logoMinTermHeight {
 		return ""
 	}
@@ -67,9 +69,19 @@ func renderLogo(th *theme.Theme, termWidth, termHeight int) string {
 	if dashCount < 0 {
 		dashCount = 0
 	}
-	row2 := th.AccentStyle().Render("╰─╯") + th.Muted().Render(strings.Repeat("─", dashCount))
-	if rw := lipgloss.Width(row2); rw < termWidth {
-		row2 += strings.Repeat(" ", termWidth-rw)
+	rule := th.AccentStyle().Render("╰─╯") + th.Muted().Render(strings.Repeat("─", dashCount))
+	ruleW := lipgloss.Width(rule)
+	indW := lipgloss.Width(indicator)
+
+	var row2 string
+	if indicator != "" && ruleW+1+indW <= termWidth {
+		// Right-align the sign-in indicator at the far edge of the rule row.
+		row2 = rule + strings.Repeat(" ", termWidth-ruleW-indW) + indicator
+	} else {
+		row2 = rule
+		if rw := lipgloss.Width(row2); rw < termWidth {
+			row2 += strings.Repeat(" ", termWidth-rw)
+		}
 	}
 
 	return row1 + "\n" + row2

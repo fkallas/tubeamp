@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/player"
+	"github.com/fkallas/tubeamp/internal/ytm"
 )
 
 // controlFlags holds the one-shot CLI control flags. When any is set, tubeamp
@@ -77,7 +81,7 @@ func dispatchControl(out, errOut io.Writer, cfg *config.Config, f controlFlags) 
 	case f.seek != "":
 		return applySeek(errOut, p, f.seek)
 	case f.status:
-		return printStatus(out, errOut, p)
+		return printStatus(out, errOut, cfg, p)
 	case f.line:
 		return printLine(out, p)
 	case f.queue:
@@ -124,8 +128,10 @@ func applySeek(errOut io.Writer, p *player.Player, spec string) int {
 	return runErr(errOut, p.Seek(sec))
 }
 
-// printStatus writes a multi-line human-readable status.
-func printStatus(out, errOut io.Writer, p *player.Player) int {
+// printStatus writes a multi-line human-readable status. A best-effort YT Music
+// sign-in line is appended last (bounded so -status never hangs on a dead
+// network).
+func printStatus(out, errOut io.Writer, cfg *config.Config, p *player.Player) int {
 	s, err := p.Snapshot()
 	if err != nil {
 		fmt.Fprintln(errOut, "tubeamp:", err)
@@ -133,6 +139,7 @@ func printStatus(out, errOut io.Writer, p *player.Player) int {
 	}
 	if s.PlaylistPos < 0 || s.PlaylistPos >= len(s.Tracks) {
 		fmt.Fprintln(out, "■ stopped")
+		fmt.Fprintln(out, ytmStatusLine(cfg))
 		return 0
 	}
 	t := s.Tracks[s.PlaylistPos]
@@ -154,7 +161,37 @@ func printStatus(out, errOut io.Writer, p *player.Player) int {
 	}
 	fmt.Fprintf(out, "  volume: %s\n", vol)
 	fmt.Fprintf(out, "  track:  %d/%d\n", s.PlaylistPos+1, len(s.Tracks))
+	fmt.Fprintln(out, ytmStatusLine(cfg))
 	return 0
+}
+
+// ytmAccountInfo probes the YT Music sign-in state used by -status. It attaches
+// a throwaway InnerTube client (auth from DataDir()/auth, account index from
+// config) and asks for the account info. It is a package variable so tests can
+// stub it without touching the network.
+var ytmAccountInfo = func(ctx context.Context, cfg *config.Config) (name string, signedIn bool, err error) {
+	auth, _ := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth"))
+	c := ytm.NewClient(auth)
+	c.SetAuthUser(cfg.AuthUser)
+	return c.AccountInfo(ctx)
+}
+
+// ytmStatusLine returns the "yt music: …" status line for -status under a tight
+// 2s timeout: a signed-in cookie yields "signed in as <name>", a logged-out or
+// absent cookie yields "anonymous", and any error (e.g. the network is down)
+// yields "unknown" — so -status never fails or stalls on this lookup.
+func ytmStatusLine(cfg *config.Config) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	name, signedIn, err := ytmAccountInfo(ctx, cfg)
+	switch {
+	case err != nil:
+		return "yt music: unknown"
+	case signedIn:
+		return "yt music: signed in as " + name
+	default:
+		return "yt music: anonymous"
+	}
 }
 
 // printLine writes one compact status line (≈48 cols), or nothing when idle so

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"image"
 	"strings"
 	"testing"
@@ -520,6 +521,79 @@ func TestLogoVisibilityBoundary(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// TestAuthIndicatorBeforeCheck asserts no sign-in indicator is shown until the
+// one-shot AccountInfo check resolves.
+func TestAuthIndicatorBeforeCheck(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	if got := m.authIndicator(); got != "" {
+		t.Errorf("indicator before check = %q, want empty", got)
+	}
+}
+
+// TestAuthIndicatorSignedIn injects a signed-in AccountInfo result (via the msg,
+// not the network) and asserts the name shows with the filled bullet in the view.
+func TestAuthIndicatorSignedIn(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	if !m.authChecked || !m.authSignedIn {
+		t.Fatalf("signed-in msg not applied: checked=%v signedIn=%v", m.authChecked, m.authSignedIn)
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "● Felipe Kallas") {
+		t.Errorf("view missing signed-in indicator \"● Felipe Kallas\" in:\n%s", v)
+	}
+}
+
+// TestAuthIndicatorAnonymousWithAuth covers the stale-cookie case: an auth file
+// is present (hasAuth) but YouTube returns the logged-out menu.
+func TestAuthIndicatorAnonymousWithAuth(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m.hasAuth = true // an auth file was loaded
+	m = send(m, accountInfoMsg{signedIn: false})
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "anonymous") || !strings.Contains(v, "cookie stale") {
+		t.Errorf("view missing stale-cookie indicator in:\n%s", v)
+	}
+}
+
+// TestAuthIndicatorNotSignedIn covers the no-auth-file case: anonymous result and
+// no cookie loaded yields "not signed in".
+func TestAuthIndicatorNotSignedIn(t *testing.T) {
+	m := newTestModel(t, 120, 40) // nil client => hasAuth false
+	m = send(m, accountInfoMsg{signedIn: false})
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "not signed in") {
+		t.Errorf("view missing \"not signed in\" indicator in:\n%s", v)
+	}
+}
+
+// TestAuthIndicatorErrorStaysUnresolved asserts a failed check (network down)
+// leaves the indicator blank rather than flashing a spurious state.
+func TestAuthIndicatorErrorStaysUnresolved(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = send(m, accountInfoMsg{err: context.DeadlineExceeded})
+	if m.authChecked {
+		t.Errorf("authChecked set despite error")
+	}
+	if got := m.authIndicator(); got != "" {
+		t.Errorf("indicator after error = %q, want empty", got)
+	}
+}
+
+// TestAuthIndicatorInStatusRowWhenLogoHidden asserts that with the logo hidden
+// (short terminal) the indicator falls through to the bottom status line.
+func TestAuthIndicatorInStatusRowWhenLogoHidden(t *testing.T) {
+	m := newTestModel(t, 120, 22) // below logoMinTermHeight => logo hidden
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "tubeamp") {
+		t.Fatalf("logo should be hidden at height 22")
+	}
+	if !strings.Contains(v, "● Felipe Kallas") {
+		t.Errorf("indicator not shown in status row when logo hidden:\n%s", v)
 	}
 }
 

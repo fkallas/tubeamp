@@ -25,6 +25,7 @@ type Config struct {
 	MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
 	YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
 	ArtPalette string `yaml:"art_palette"` // "auto" (default) or "theme"
+	AuthUser   int    `yaml:"auth_user"`   // X-Goog-AuthUser account index, default 0
 }
 
 // Default returns the default configuration.
@@ -35,6 +36,7 @@ func Default() *Config {
 		MPVPath:    "mpv",
 		YTDLFormat: "bestaudio",
 		ArtPalette: ArtPaletteAuto,
+		AuthUser:   0,
 	}
 }
 

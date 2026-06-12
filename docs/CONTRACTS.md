@@ -61,6 +61,7 @@ type Config struct {
     MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
     YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
     ArtPalette string `yaml:"art_palette"` // ArtPaletteAuto (default) or ArtPaletteTheme
+    AuthUser   int    `yaml:"auth_user"`   // X-Goog-AuthUser account index, default 0 (multi-account)
 }
 
 const (
@@ -294,7 +295,9 @@ InnerTube (YT Music private API) client skeleton. POST JSON to
 `context.client` of `{"clientName":"WEB_REMIX","clientVersion":"1.20240101.01.00"}`
 (no API key needed). Authenticated requests add the `Cookie` header plus
 `Authorization: SAPISIDHASH <ts>_<sha1hex(ts + " " + SAPISID + " " + origin)>`
-and `X-Origin`/`Origin: https://music.youtube.com`.
+and `X-Origin`/`Origin: https://music.youtube.com`. The `X-Goog-AuthUser` header
+carries the configured account index (`config.AuthUser`, default 0) set via
+`SetAuthUser`, not a hardcoded "0".
 
 ```go
 // package ytm
@@ -304,15 +307,22 @@ func (a *Auth) SAPISID() (string, error)  // parsed from cookie (SAPISID or __Se
 
 type Client struct{ ... }
 func NewClient(a *Auth) *Client // a may be nil => unauthenticated (search still works)
+func (c *Client) SetAuthUser(n int)     // X-Goog-AuthUser index for multi-account (clamped >=0)
+func (c *Client) Authenticated() bool   // an auth cookie was loaded (NOT a live sign-in check)
 func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error)       // songs filter
 func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter
 func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error)
                                                   // browse endpoint {browseId: ...}; sets Album.BrowseID = browseID
+func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, err error)
+                                                  // account/account_menu; signedIn = activeAccountHeaderRenderer
+                                                  // present, name from its accountName runs. Logged-out menu =>
+                                                  // ("", false, nil) (a result, not an error). HTTP errors => err.
 
 // package ytm/parse — ALL response JSON parsing lives here, fixture-tested.
 func SearchTracks(raw []byte) ([]model.Track, error)                  // songs search shelf
 func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums search shelf + top-result card
 func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
+func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account/account_menu menu (both shapes)
 // All defensive: skip malformed items, never panic. AlbumPage handles BOTH
 // header shapes (musicDetailHeaderRenderer and musicResponsiveHeaderRenderer);
 // per-track artists fall back to album artists, Track.Album = album title,
@@ -324,6 +334,8 @@ songs-/albums-filter `params` constants with a `// TODO: verify against ytmusica
 comment. Parser fixtures in `parse/testdata/` (`search_albums.json`,
 `album_page.json`) are trimmed live captures; `album_page_detail.json` is
 handcrafted to exercise the older `musicDetailHeaderRenderer` shape.
+`account_signed_in.json` / `account_logged_out.json` are handcrafted to exercise
+both `AccountInfo` shapes (with and without `activeAccountHeaderRenderer`).
 
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 
@@ -367,6 +379,15 @@ Logo header: 2 rows, at most ~28 cols for the glyph+wordmark. The glyph
 ("╭◉╮") is rendered in AccentStyle, the wordmark "tubeamp" in Primary, and
 "v0.1.0" right-aligned in Muted. When terminal height < 24 the logo is hidden
 entirely and the panel area reclaims those 2 rows.
+
+Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
+`AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently
+at the right end of the logo's rule row, or right-aligned on the bottom status
+line when the logo is hidden. Signed in => "● <name>" in PlayingStyle; an auth
+file that resolves anonymous (a stale cookie) => "○ anonymous — cookie stale?
+see README" in Muted; no auth file => "○ not signed in" in Muted. A failed check
+(network down) leaves the indicator blank (no retry). Tests inject the result via
+`accountInfoMsg`, never the network.
 
 Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 (items + border), Playlists/Queue split the rest. Player bar 4 content lines.
@@ -469,9 +490,10 @@ real library lands.
 `main.go`: parse flags; `config.Load`. With no control flag set it runs the TUI:
 `-theme <name>` override, `-version`; `theme.Load` (fall back to `theme.Default()`
 with a warning); `player.New` (attach-or-spawn; on error nil player + degraded
-notice); `ytm.LoadAuth(DataDir()/auth)` (missing → nil auth) + `ytm.NewClient`;
-`core.NewQueue`; `ui.New`; `tea.NewProgram(..., tea.WithAltScreen())`. On exit:
-`player.Close()` — a DETACH, so mpv keeps playing in the background.
+notice); `ytm.LoadAuth(DataDir()/auth)` (missing → nil auth) + `ytm.NewClient`
+then `client.SetAuthUser(cfg.AuthUser)`; `core.NewQueue`; `ui.New`;
+`tea.NewProgram(..., tea.WithAltScreen())`. On exit: `player.Close()` — a DETACH,
+so mpv keeps playing in the background.
 
 `control.go`: when any one-shot control flag is set, `dispatchControl` drives the
 running daemon instead of opening the TUI. All use `player.New` with
@@ -487,7 +509,7 @@ feed tmux/status scripts.
 | `-stop`     | stop playback                                                         |
 | `-vol N`    | set volume: `N` absolute, `+N`/`-N` relative                          |
 | `-seek S`   | seek `±S` seconds (relative)                                          |
-| `-status`   | multi-line human-readable status (glyph, title, artists, album, pos/dur, volume, track n/m) |
+| `-status`   | multi-line human-readable status (glyph, title, artists, album, pos/dur, volume, track n/m) + a `yt music: signed in as <name> / anonymous / unknown` line (best-effort, 2s-bounded — never fails or stalls `-status`) |
 | `-line`     | one compact line `♪ Title — Artist 1:23/3:54` (~48 cols); empty when idle or no daemon |
 | `-queue`    | numbered queue, playing row marked `▶`                               |
 | `-kill`     | `player.Quit()` the daemon (removes socket + lock)                    |

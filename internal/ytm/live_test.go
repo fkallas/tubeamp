@@ -3,8 +3,11 @@ package ytm
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/fkallas/tubeamp/internal/config"
 )
 
 // TestSearch_live performs a real network call to YouTube Music (unauthenticated).
@@ -67,4 +70,29 @@ func TestSearchAlbums_live(t *testing.T) {
 		t.Fatal("expected >= 1 track on album page, got 0")
 	}
 	t.Logf("live album page %q has %d tracks; first: %q (%s)", album.Title, len(tracks), tracks[0].Title, tracks[0].VideoID)
+}
+
+// TestAccountInfo_liveAuth performs a real authenticated account/account_menu
+// call using the on-disk auth file. Gated behind TUBEAMP_LIVE_AUTH=1 because the
+// cookie is the user's real credential; skipped by default. It logs only the
+// resolved sign-in state and account name — never the cookie.
+func TestAccountInfo_liveAuth(t *testing.T) {
+	if os.Getenv("TUBEAMP_LIVE_AUTH") != "1" {
+		t.Skip("set TUBEAMP_LIVE_AUTH=1 to run authenticated live tests")
+	}
+
+	auth, err := LoadAuth(filepath.Join(config.DataDir(), "auth"))
+	if err != nil {
+		t.Skipf("no auth file available: %v", err)
+	}
+	c := NewClient(auth)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	name, signedIn, err := c.AccountInfo(ctx)
+	if err != nil {
+		t.Fatalf("AccountInfo: %v", err)
+	}
+	t.Logf("live AccountInfo: signedIn=%v name=%q", signedIn, name)
 }

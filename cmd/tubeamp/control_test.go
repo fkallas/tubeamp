@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,17 @@ import (
 
 	"github.com/fkallas/tubeamp/internal/config"
 )
+
+// stubAccountInfo replaces the YT Music sign-in probe with a canned result so
+// -status tests never touch the network; the original is restored on cleanup.
+func stubAccountInfo(t *testing.T, name string, signedIn bool, err error) {
+	t.Helper()
+	orig := ytmAccountInfo
+	ytmAccountInfo = func(context.Context, *config.Config) (string, bool, error) {
+		return name, signedIn, err
+	}
+	t.Cleanup(func() { ytmAccountInfo = orig })
+}
 
 // fakeDaemon is an in-process stand-in for the mpv JSON-IPC endpoint, listening
 // on a real unix socket so dispatchControl exercises the genuine attach path. It
@@ -248,14 +260,37 @@ func TestDispatchStatus(t *testing.T) {
 		"mute":         "false",
 	}
 	setupFakeDaemon(t, props)
+	stubAccountInfo(t, "Felipe Kallas", true, nil) // no network; canned sign-in
 	var out, errOut bytes.Buffer
 	if code := dispatchControl(&out, &errOut, config.Default(), controlFlags{status: true}); code != 0 {
 		t.Fatalf("exit = %d, stderr = %q", code, errOut.String())
 	}
 	s := out.String()
-	for _, want := range []string{"Song A", "1:23", "3:54", "75%", "1/2"} {
+	for _, want := range []string{"Song A", "1:23", "3:54", "75%", "1/2", "yt music: signed in as Felipe Kallas"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("status missing %q; got:\n%s", want, s)
+		}
+	}
+}
+
+// TestYTMStatusLine pins the three sign-in renderings of -status' yt music line
+// (signed in / anonymous / unknown), stubbing the probe so no network is touched.
+func TestYTMStatusLine(t *testing.T) {
+	cfg := config.Default()
+	cases := []struct {
+		name     string
+		signedIn bool
+		err      error
+		want     string
+	}{
+		{"Felipe", true, nil, "yt music: signed in as Felipe"},
+		{"", false, nil, "yt music: anonymous"},
+		{"", false, context.DeadlineExceeded, "yt music: unknown"},
+	}
+	for _, tc := range cases {
+		stubAccountInfo(t, tc.name, tc.signedIn, tc.err)
+		if got := ytmStatusLine(cfg); got != tc.want {
+			t.Errorf("ytmStatusLine = %q, want %q", got, tc.want)
 		}
 	}
 }
