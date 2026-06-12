@@ -787,9 +787,11 @@ process check is gated behind `TUBEAMP_LIVE_PROC=1` (optional
 
 ```go
 // package ui
-func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider) Model
+func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider, hist *history.Store, enr *enrich.Enricher) Model
 // Model implements tea.Model (v1). Run with tea.NewProgram(m, tea.WithAltScreen()).
-// p and c may each be nil => degraded mode (status-line notice instead of crash).
+// p, c, hist and enr may each be nil => degraded mode (status-line notice instead
+// of crash; History + play-recording become no-ops; the Albums section shows only
+// what the raw aggregate carries, with no background enrichment).
 // lib is the library SOURCE; pass an untyped nil when there is none (a typed-nil
 // pointer would wrongly trip the m.lib != nil guard).
 
@@ -808,6 +810,15 @@ type libraryProvider interface {
     LibraryPlaylists(context.Context) ([]model.Playlist, error)
     LikedSongs(context.Context) ([]model.Track, error)
     PlaylistTracks(context.Context, string) ([]model.Track, error)
+}
+
+// librarySongsProvider is the OPTIONAL extension exposing the whole-library
+// aggregate behind the derived sections (Songs/Artists/Albums). Only the
+// OAuth-backed *ytdata.Client implements it (it has LibrarySongs); a cookie
+// *ytm.Client does NOT, so on a cookie session those three sections stay mock.
+// The UI reaches it by type-asserting m.lib, so libraryProvider stays unchanged.
+type librarySongsProvider interface {
+    LibrarySongs(context.Context) ([]model.Track, error)
 }
 
 // ANSI-aware overlay compositor (compose.go). Splices an overlay box over the
@@ -1135,10 +1146,40 @@ Data-API tracks carry no album (`Album`/`AlbumID` == "") and no duration
 duration, and the player bar shows `--:--` for an unknown total (mpv fills the
 real duration in once the file loads) — never a negative/garbage time.
 
-The other Library items (Albums/Artists/Songs/History) remain mock for now.
-Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`), or drive
-a fake `libraryProvider`; the real browses never run from tests. Mock data lives
-in `internal/ui/mock.go`.
+#### Derived Library sections (Songs / Artists / Albums / History)
+
+The remaining Library sections are wired off the whole-library aggregate
+(`librarySongsProvider.LibrarySongs`, the OAuth Data API client only) plus two
+local subsystems (`internal/enrich`, `internal/history`). All load into the
+main view on `enter`, are gated on a real source, and fall back to mock data
+when none is present (with the sign-in hint when `m.lib == nil` but a search
+client exists):
+
+- **Songs** → `lib.LibrarySongs` into a plain track table titled "Songs"
+  (cache-resident enrichment is applied first, so already-known durations show).
+- **Artists** → `ytdata.GroupArtists` of the aggregate into a new main-view kind
+  (`mainArtists`): rows `♪ <name> (<n>)`, sorted case-insensitively by name.
+  `enter` on an artist `pushMain`s that artist's tracks titled the artist name.
+- **Albums** → `ytdata.AlbumsFromTracks` of the aggregate into `mainAlbums`
+  (album rows reusing the search Albums rendering + the album-row `enter`/`o`
+  GetAlbum flow). Because the Data API omits the album, the aggregate is enriched
+  progressively in the background via `internal/enrich`: `Fill` from the
+  permanent cache is instant, the still-missing videoIDs are fetched in
+  `enrichChunk`-sized Cmds (`enrichResultMsg`), and the album list refreshes as
+  they resolve. Progress shows on the status line ("enriching albums… N/M"). The
+  chunk Cmds ride `libGen`, so a section change (esc, new search/section, opening
+  an album) abandons the in-flight enrichment. Revisits fill instantly from cache.
+- **History** → `internal/history.List` into a plain table titled "History".
+  This is tubeamp's OWN local play history (not YouTube's): each now-playing
+  transition records the track via `history.Record` in a Cmd (off `reflectCurrent`,
+  never blocking Update). Gated on `m.hist != nil`.
+
+`enter` on the derived sections issues a `libAggregateMsg` (Songs/Artists/Albums)
+guarded by `libGen`, degrading on `ErrNotSignedIn` like the other library loads.
+Tests inject `libPlaylistsMsg` / `libTracksMsg` / `libAggregateMsg` /
+`enrichResultMsg` (and `accountInfoMsg`), or drive a fake `libraryProvider` (which
+also implements `LibrarySongs`); the real browses never run from tests. Mock data
+lives in `internal/ui/mock.go`.
 
 ## cmd/tubeamp
 

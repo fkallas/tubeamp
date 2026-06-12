@@ -18,7 +18,10 @@ import (
 
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
+	"github.com/fkallas/tubeamp/internal/enrich"
+	"github.com/fkallas/tubeamp/internal/history"
 	"github.com/fkallas/tubeamp/internal/player"
+	"github.com/fkallas/tubeamp/internal/store"
 	"github.com/fkallas/tubeamp/internal/theme"
 	"github.com/fkallas/tubeamp/internal/ui"
 	"github.com/fkallas/tubeamp/internal/ytm"
@@ -144,6 +147,14 @@ func run(cfg *config.Config, themeOverride string) error {
 
 	oauthLib := oauthLibrary(cfg)
 
+	// Local play history (tubeamp's own — Google removed watch-history from the
+	// APIs) backs the Library "History" section and records each play. The
+	// enricher fills the album + duration the Data API omits, from anonymous
+	// InnerTube (the cookie/anonymous `client`, never OAuth), with a permanent
+	// on-disk cache; it backs the Library "Albums" section's progressive fill.
+	hist := history.New(filepath.Join(config.DataDir(), "history.json"))
+	enr := enrich.NewEnricher(store.NewCache(filepath.Join(config.CacheDir(), "enrich")), client)
+
 	// Library source selection. OAuth (the official YouTube Data API) is the
 	// durable library source and is preferred when configured + a token is
 	// stored; otherwise a present cookie auth file lets the InnerTube client
@@ -153,11 +164,11 @@ func run(cfg *config.Config, themeOverride string) error {
 	var m ui.Model
 	switch {
 	case oauthLib != nil:
-		m = ui.New(cfg, th, p, client, q, oauthLib)
+		m = ui.New(cfg, th, p, client, q, oauthLib, hist, enr)
 	case client.Authenticated():
-		m = ui.New(cfg, th, p, client, q, client)
+		m = ui.New(cfg, th, p, client, q, client, hist, enr)
 	default:
-		m = ui.New(cfg, th, p, client, q, nil)
+		m = ui.New(cfg, th, p, client, q, nil, hist, enr)
 	}
 	prog := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := prog.Run(); err != nil {

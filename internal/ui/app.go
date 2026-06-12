@@ -8,6 +8,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"path/filepath"
 	"strings"
@@ -22,12 +23,15 @@ import (
 	"github.com/fkallas/tubeamp/internal/auth"
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
+	"github.com/fkallas/tubeamp/internal/enrich"
+	"github.com/fkallas/tubeamp/internal/history"
 	"github.com/fkallas/tubeamp/internal/model"
 	"github.com/fkallas/tubeamp/internal/player"
 	"github.com/fkallas/tubeamp/internal/theme"
 	"github.com/fkallas/tubeamp/internal/ui/keymap"
 	"github.com/fkallas/tubeamp/internal/ui/overlay"
 	"github.com/fkallas/tubeamp/internal/ui/panels"
+	"github.com/fkallas/tubeamp/internal/ytdata"
 	"github.com/fkallas/tubeamp/internal/ytm"
 )
 
@@ -66,9 +70,11 @@ const (
 type mainKind int
 
 const (
-	mainTracks mainKind = iota // a plain track list (library, playlist, etc.)
-	mainSearch                 // search results: a Songs section then an Albums section
-	mainAlbum                  // an album detail view (cover + header + track list)
+	mainTracks  mainKind = iota // a plain track list (library, playlist, etc.)
+	mainSearch                  // search results: a Songs section then an Albums section
+	mainAlbum                   // an album detail view (cover + header + track list)
+	mainArtists                 // the Library "Artists" list: one row per primary artist
+	mainAlbums                  // the Library "Albums" list: album rows (reuses the album-row flow)
 )
 
 // mainContent is one frame of the main-view stack: a titled list with its own
@@ -79,8 +85,9 @@ type mainContent struct {
 	kind   mainKind
 	title  string
 	tracks []model.Track
-	albums []model.Album // mainSearch: the rendered Albums section (merged, see below)
-	album  model.Album   // mainAlbum: the album being viewed
+	albums []model.Album        // mainSearch/mainAlbums: the album rows
+	album  model.Album          // mainAlbum: the album being viewed
+	groups []ytdata.ArtistGroup // mainArtists: the grouped library artists (name + tracks)
 	cursor int
 	// mainSearch Albums section is merged from two sources that arrive separately:
 	// derivedAlbums (reconstructed from the full-catalog song hits) shown FIRST,
@@ -117,14 +124,28 @@ type libraryProvider interface {
 	PlaylistTracks(context.Context, string) ([]model.Track, error)
 }
 
+// librarySongsProvider is the OPTIONAL extension of libraryProvider that exposes
+// the whole-library aggregate (LikedSongs ++ every owned playlist's tracks) that
+// backs the derived Library sections — "Songs", "Artists" (grouped by primary
+// artist) and "Albums" (grouped by enriched AlbumID). Only the OAuth-backed
+// *ytdata.Client implements it; a cookie *ytm.Client does not, so on a cookie
+// session those three sections stay on mock data. The UI reaches it by
+// type-asserting m.lib, so libraryProvider itself stays satisfiable by both
+// sources unchanged.
+type librarySongsProvider interface {
+	LibrarySongs(context.Context) ([]model.Track, error)
+}
+
 // Model is the root tea.Model for tubeamp.
 type Model struct {
-	cfg *config.Config
-	th  *theme.Theme
-	p   *player.Player  // may be nil => playback disabled
-	c   *ytm.Client     // may be nil => search disabled
-	lib libraryProvider // may be nil => no real library (mock data + sign-in hint)
-	q   *core.Queue
+	cfg  *config.Config
+	th   *theme.Theme
+	p    *player.Player  // may be nil => playback disabled
+	c    *ytm.Client     // may be nil => search disabled
+	lib  libraryProvider // may be nil => no real library (mock data + sign-in hint)
+	q    *core.Queue
+	hist *history.Store   // may be nil => local play history disabled (History stays mock)
+	enr  *enrich.Enricher // may be nil => no album/duration enrichment (cache-only is also nil-safe)
 
 	keys keymap.KeyMap
 
@@ -166,6 +187,18 @@ type Model struct {
 	// invalidate each other.
 	libGen int
 	plGen  int
+
+	// Library "Albums" background enrichment. The Data API exposes neither a
+	// song's album nor its duration, so the aggregate is enriched progressively
+	// from the anonymous InnerTube `next` endpoint (internal/enrich). enrichTracks
+	// is the aggregate being enriched in place; enrichQueue is the videoIDs still
+	// to fetch (drained one chunk at a time, only one chunk in flight); enrichTotal
+	// is the initial missing count for the "enriching albums… N/M" status. The
+	// follow-up chunk Cmds are libGen-guarded, so a section change (esc, a new
+	// search/section, opening an album) abandons the in-flight enrichment.
+	enrichTracks []model.Track
+	enrichQueue  []string
+	enrichTotal  int
 
 	// Overlays.
 	overlay   overlayKind
@@ -242,12 +275,15 @@ type Model struct {
 	lyricsResumeAt float64
 }
 
-// New constructs the root model. p (player), c (ytm client) and lib (library
-// source) may each be nil, in which case the affected features are disabled (a
-// status-line notice for player/search; mock data + sign-in hint for the
-// library). lib must be an untyped nil when there is no library source — a typed
-// nil pointer would make the m.lib != nil guard wrongly fire.
-func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider) Model {
+// New constructs the root model. p (player), c (ytm client), lib (library
+// source), hist (local play history) and enr (album/duration enricher) may each
+// be nil, in which case the affected features are disabled (a status-line notice
+// for player/search; mock data + sign-in hint for the library; the History
+// section and play-recording become no-ops; the Albums section shows whatever the
+// raw aggregate already carries with no background enrichment). lib must be an
+// untyped nil when there is no library source — a typed nil pointer would make the
+// m.lib != nil guard wrongly fire.
+func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue, lib libraryProvider, hist *history.Store, enr *enrich.Enricher) Model {
 	m := Model{
 		cfg:              cfg,
 		th:               th,
@@ -255,6 +291,8 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		c:                c,
 		lib:              lib,
 		q:                q,
+		hist:             hist,
+		enr:              enr,
 		keys:             keymap.Default(),
 		focus:            focusLibrary,
 		libItems:         libraryItems(),
@@ -461,6 +499,26 @@ type libTracksMsg struct {
 	err    error
 }
 
+// libAggregateMsg carries a whole-library aggregate (lib.LibrarySongs) load,
+// destined for one of the derived sections named by section ("Songs", "Artists"
+// or "Albums"). gen ties it to the libGen that issued it; err is
+// ytm.ErrNotSignedIn for an anonymous session, handled like the other library
+// loads (downgrade + sign-in hint).
+type libAggregateMsg struct {
+	gen     int
+	section string
+	tracks  []model.Track
+	err     error
+}
+
+// enrichResultMsg carries one background album-enrichment chunk's results
+// (album + duration for some videoIDs). gen ties it to the libGen of the Albums
+// view that started the enrichment, so a section change drops it.
+type enrichResultMsg struct {
+	gen     int
+	details []enrich.Detail
+}
+
 // listenPlayer receives one player event per command and is re-issued after
 // each event so the stream keeps flowing without blocking Update.
 func listenPlayer(p *player.Player) tea.Cmd {
@@ -645,6 +703,38 @@ func playlistTracksCmd(lib libraryProvider, id, title string, gen int) tea.Cmd {
 		defer cancel()
 		ts, err := lib.PlaylistTracks(ctx, id)
 		return libTracksMsg{gen: gen, title: title, tracks: ts, err: err}
+	}
+}
+
+// librarySongsCmd fetches the whole-library aggregate for a derived section
+// (Songs/Artists/Albums) into the main view. The aggregate fans out one
+// pagination per playlist, so it gets a generous timeout; section is echoed back
+// so the handler knows how to render the result.
+func librarySongsCmd(ls librarySongsProvider, section string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		ts, err := ls.LibrarySongs(ctx)
+		return libAggregateMsg{gen: gen, section: section, tracks: ts, err: err}
+	}
+}
+
+// enrichChunk is the number of videoIDs fetched per background enrichment Cmd.
+// Small chunks keep the album list updating responsively (and tubeamp light on
+// InnerTube) while a large library fills in.
+const enrichChunk = 8
+
+// enrichChunkCmd enriches one chunk of videoIDs (album + duration) off the Update
+// goroutine. EnrichMissing writes every success to the permanent cache; the
+// returned details are also applied to the in-memory aggregate. gen guards the
+// result against a section change.
+func enrichChunkCmd(e *enrich.Enricher, ids []string, gen int) tea.Cmd {
+	ids = append([]string(nil), ids...) // copy: the model's queue keeps mutating
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		details, _ := e.EnrichMissing(ctx, ids)
+		return enrichResultMsg{gen: gen, details: details}
 	}
 }
 
@@ -939,6 +1029,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setMain(msg.title, msg.tracks)
 		m.setFocus(focusMain)
 		return m, nil
+
+	case libAggregateMsg:
+		return m.applyAggregate(msg)
+
+	case enrichResultMsg:
+		return m.applyEnrich(msg)
 
 	case reimportMsg:
 		// A failed import/write/load (no fresh client) or a CONFIRMED anonymous
@@ -1327,7 +1423,11 @@ func (m *Model) listState() (*int, int) {
 		return &m.queueCursor, m.q.Len()
 	case focusMain:
 		top := &m.stack[len(m.stack)-1]
-		// A search frame's cursor runs through both sections (songs then albums).
+		if top.kind == mainArtists {
+			return &top.cursor, len(top.groups)
+		}
+		// A search / albums frame's cursor runs through both sections (songs then
+		// albums); for plain track and album-list frames one of them is empty.
 		return &top.cursor, len(top.tracks) + len(top.albums)
 	}
 	return nil, 0
@@ -1393,25 +1493,7 @@ func (m *Model) handleEnter() tea.Cmd {
 	switch m.focus {
 	case focusLibrary:
 		if m.libCursor >= 0 && m.libCursor < len(m.libItems) {
-			name := m.libItems[m.libCursor]
-			// Liked Songs loads live for a signed-in session; everything else
-			// (Albums/Artists/Songs/History) stays mock for now.
-			if name == "Liked Songs" && m.canLoadLibrary() {
-				m.libGen++
-				m.setStatus("loading Liked Songs…")
-				m.setFocus(focusMain)
-				return likedSongsCmd(m.lib, name, m.libGen)
-			}
-			if name == "Liked Songs" && m.c != nil {
-				// No library source, but a (search) client is present: keep mock
-				// data and point the user at signing in.
-				m.setMain(name, mockLibraryTracks(name))
-				m.setFocus(focusMain)
-				m.setError("sign in to load your library — see README")
-				return nil
-			}
-			m.setMain(name, mockLibraryTracks(name))
-			m.setFocus(focusMain)
+			return m.openLibrarySection(m.libItems[m.libCursor])
 		}
 	case focusPlaylists:
 		if m.plCursor >= 0 && m.plCursor < len(m.playlists) {
@@ -1450,17 +1532,27 @@ func (m *Model) handleEnter() tea.Cmd {
 		return tea.Batch(m.reflectCurrent(true), jumpCmd(m.p, m.queueCursor))
 	case focusMain:
 		top := m.stack[len(m.stack)-1]
-		if top.kind == mainSearch && top.cursor >= len(top.tracks) {
-			// An album row is selected: fetch the album and play it.
+		switch {
+		case top.kind == mainArtists:
+			// An artist row: push that artist's tracks (titled the artist name).
+			if top.cursor >= 0 && top.cursor < len(top.groups) {
+				g := top.groups[top.cursor]
+				m.pushMain(g.Name, g.Tracks)
+			}
+			return nil
+		case (top.kind == mainSearch || top.kind == mainAlbums) && top.cursor >= len(top.tracks):
+			// An album row (search Albums section, or the Library Albums list):
+			// fetch the album and play it.
 			ai := top.cursor - len(top.tracks)
 			if ai >= 0 && ai < len(top.albums) {
 				return m.openAlbum(top.albums[ai], false)
 			}
 			return nil
+		default:
+			// A track row (plain list, search song, or album-view track): replace
+			// the queue with this list starting at the selected track and play.
+			return m.playTracks(top.tracks, top.cursor)
 		}
-		// A track row (plain list, search song, or album-view track): replace the
-		// queue with this list starting at the selected track and play.
-		return m.playTracks(top.tracks, top.cursor)
 	}
 	return nil
 }
@@ -1495,15 +1587,16 @@ func (m *Model) handleOpen() tea.Cmd {
 	switch m.focus {
 	case focusMain:
 		top := m.stack[len(m.stack)-1]
-		if top.kind == mainSearch && top.cursor >= len(top.tracks) {
-			// An album row of a search frame: open by the album's own browseId.
+		if (top.kind == mainSearch || top.kind == mainAlbums) && top.cursor >= len(top.tracks) {
+			// An album row (search Albums section, or the Library Albums list):
+			// open by the album's own browseId.
 			ai := top.cursor - len(top.tracks)
 			if ai < 0 || ai >= len(top.albums) {
 				return nil
 			}
 			return m.openAlbum(top.albums[ai], true)
 		}
-		if top.kind == mainAlbum {
+		if top.kind == mainAlbum || top.kind == mainArtists {
 			return nil
 		}
 		if t, ok := m.mainCurrent(); ok {
@@ -1607,10 +1700,10 @@ func (m *Model) reflectCurrent(resetTime bool) tea.Cmd {
 	}
 	art := m.refreshArt()
 	if newTrack {
-		// New track: reset any focused-lyrics scroll/detach and refresh the lyrics
-		// panel alongside the cover art.
+		// New track: reset any focused-lyrics scroll/detach, refresh the lyrics
+		// panel alongside the cover art, and record the play in the local history.
 		m.reengageLyrics()
-		return tea.Batch(art, m.ensureLyrics())
+		return tea.Batch(art, m.ensureLyrics(), m.recordHistoryCmd(t))
 	}
 	return art
 }
@@ -1751,6 +1844,250 @@ func (m *Model) setMain(title string, tracks []model.Track) {
 // pushMain pushes a new track-list content frame onto the main-view stack.
 func (m *Model) pushMain(title string, tracks []model.Track) {
 	m.stack = append(m.stack, mainContent{title: title, tracks: tracks})
+}
+
+// setArtists replaces the main-view stack with the Library "Artists" list. Like
+// setMain it invalidates any in-flight search/album/library fetch so a late
+// result cannot replace the view.
+func (m *Model) setArtists(title string, groups []ytdata.ArtistGroup) {
+	m.stack = []mainContent{{kind: mainArtists, title: title, groups: groups}}
+	m.searchGen++
+	m.albumGen++
+	m.libGen++
+}
+
+// librarySource returns the library source as a librarySongsProvider when it
+// exposes the whole-library aggregate (the OAuth-backed *ytdata.Client). A nil or
+// cookie-only source yields (nil, false).
+func (m Model) librarySource() (librarySongsProvider, bool) {
+	if m.lib == nil {
+		return nil, false
+	}
+	ls, ok := m.lib.(librarySongsProvider)
+	return ls, ok
+}
+
+// openLibrarySection routes a Library-panel enter to the right loader. Real
+// sources load live; with no source the section falls back to mock data (plus a
+// sign-in hint when a search client is present and there is no library at all).
+func (m *Model) openLibrarySection(name string) tea.Cmd {
+	switch name {
+	case "Liked Songs":
+		return m.openLikedSongs(name)
+	case "Songs", "Artists", "Albums":
+		return m.openAggregateSection(name)
+	case "History":
+		return m.openHistory(name)
+	default:
+		m.setMain(name, mockLibraryTracks(name))
+		m.setFocus(focusMain)
+		return nil
+	}
+}
+
+// openLikedSongs loads the Liked Songs auto-playlist from a real source, else
+// falls back to the mock list (with a sign-in hint when a search client exists).
+func (m *Model) openLikedSongs(name string) tea.Cmd {
+	if m.canLoadLibrary() {
+		m.libGen++
+		m.setStatus("loading " + name + "…")
+		m.setFocus(focusMain)
+		return likedSongsCmd(m.lib, name, m.libGen)
+	}
+	m.setMain(name, mockLibraryTracks(name))
+	m.setFocus(focusMain)
+	if m.c != nil {
+		m.setError("sign in to load your library — see README")
+	}
+	return nil
+}
+
+// openAggregateSection loads the whole-library aggregate for a derived section
+// (Songs/Artists/Albums). Only a source exposing LibrarySongs (the OAuth Data API
+// client) loads live; a nil/cookie source falls back to mock data.
+func (m *Model) openAggregateSection(name string) tea.Cmd {
+	if ls, ok := m.librarySource(); ok {
+		m.libGen++
+		m.setStatus("loading " + name + "…")
+		m.setFocus(focusMain)
+		return librarySongsCmd(ls, name, m.libGen)
+	}
+	m.setMain(name, mockLibraryTracks(name))
+	m.setFocus(focusMain)
+	if m.lib == nil && m.c != nil {
+		m.setError("sign in to load your library — see README")
+	}
+	return nil
+}
+
+// openHistory loads tubeamp's own local play history into the main view. With no
+// history store it falls back to the mock list.
+func (m *Model) openHistory(name string) tea.Cmd {
+	if m.hist != nil {
+		m.setMain("History", m.hist.List())
+		m.setFocus(focusMain)
+		return nil
+	}
+	m.setMain(name, mockLibraryTracks(name))
+	m.setFocus(focusMain)
+	return nil
+}
+
+// applyAggregate folds a LibrarySongs result into the right derived section. A
+// stale result (the user navigated away) is dropped; ErrNotSignedIn degrades like
+// the other library loads. Cache-resident enrichment fills in albums/durations
+// instantly; the Albums section then enriches the rest in the background.
+func (m Model) applyAggregate(msg libAggregateMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.libGen {
+		return m, nil
+	}
+	if msg.err != nil {
+		if errors.Is(msg.err, ytm.ErrNotSignedIn) {
+			m.downgradeAuth()
+			m.setError("sign in to load your library — see README")
+			return m, m.maybeReimportCmd()
+		}
+		m.setError(requestErrText("could not load "+msg.section+": ", msg.err))
+		return m, nil
+	}
+	m.status = ""
+	switch msg.section {
+	case "Songs":
+		m.setMain("Songs", m.fillFromCache(msg.tracks))
+		m.setFocus(focusMain)
+		return m, nil
+	case "Artists":
+		m.setArtists("Artists", ytdata.GroupArtists(m.fillFromCache(msg.tracks)))
+		m.setFocus(focusMain)
+		return m, nil
+	case "Albums":
+		return m.startAlbumsSection(msg.tracks)
+	}
+	return m, nil
+}
+
+// fillFromCache returns tracks with any already-cached album/duration applied
+// (instant, no network). With no enricher it returns the tracks unchanged.
+func (m Model) fillFromCache(tracks []model.Track) []model.Track {
+	if m.enr == nil {
+		return tracks
+	}
+	filled, _ := m.enr.Fill(tracks)
+	return filled
+}
+
+// startAlbumsSection builds the Library "Albums" list from the aggregate and
+// kicks off progressive background enrichment for the tracks the Data API left
+// without an album. It does NOT bump libGen (unlike setMain): the enrichment
+// chunk Cmds ride the current libGen so they stay valid until the user navigates.
+func (m Model) startAlbumsSection(aggregate []model.Track) (tea.Model, tea.Cmd) {
+	filled := aggregate
+	var missing []string
+	if m.enr != nil {
+		filled, missing = m.enr.Fill(aggregate)
+	}
+	m.enrichTracks = filled
+	m.enrichQueue = missing
+	m.enrichTotal = len(missing)
+
+	// Replace the stack directly (keep libGen so enrichment stays valid) but
+	// invalidate any in-flight search/album fetch so a late result cannot cover it.
+	m.stack = []mainContent{{kind: mainAlbums, title: "Albums", albums: ytdata.AlbumsFromTracks(filled)}}
+	m.searchGen++
+	m.albumGen++
+	m.setFocus(focusMain)
+
+	if cmd := m.dispatchEnrichChunk(); cmd != nil {
+		m.setStatus(m.enrichStatus())
+		return m, cmd
+	}
+	m.status = ""
+	return m, nil
+}
+
+// applyEnrich folds one background enrichment chunk into the aggregate, refreshes
+// the album list, advances the queue, and fires the next chunk. A stale result
+// (the user changed section) is dropped.
+func (m Model) applyEnrich(msg enrichResultMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.libGen {
+		return m, nil
+	}
+	if len(msg.details) > 0 {
+		applyDetailsToTracks(m.enrichTracks, msg.details)
+		if top := &m.stack[len(m.stack)-1]; top.kind == mainAlbums {
+			top.albums = ytdata.AlbumsFromTracks(m.enrichTracks)
+		}
+	}
+	// Drop the chunk just processed (success or not) so a failing id is never
+	// retried forever, then fire the next chunk.
+	n := enrichChunk
+	if n > len(m.enrichQueue) {
+		n = len(m.enrichQueue)
+	}
+	m.enrichQueue = m.enrichQueue[n:]
+	if cmd := m.dispatchEnrichChunk(); cmd != nil {
+		m.setStatus(m.enrichStatus())
+		return m, cmd
+	}
+	m.status = ""
+	return m, nil
+}
+
+// dispatchEnrichChunk returns a Cmd enriching the next queued chunk, or nil when
+// there is nothing left to enrich (or no enricher).
+func (m Model) dispatchEnrichChunk() tea.Cmd {
+	if m.enr == nil || len(m.enrichQueue) == 0 {
+		return nil
+	}
+	n := enrichChunk
+	if n > len(m.enrichQueue) {
+		n = len(m.enrichQueue)
+	}
+	return enrichChunkCmd(m.enr, m.enrichQueue[:n], m.libGen)
+}
+
+// enrichStatus renders the "enriching albums… N/M" progress line, N being the
+// number of tracks resolved so far out of M still needing enrichment at the start.
+func (m Model) enrichStatus() string {
+	return fmt.Sprintf("enriching albums… %d/%d", m.enrichTotal-len(m.enrichQueue), m.enrichTotal)
+}
+
+// applyDetailsToTracks fills only the still-missing album/duration fields of any
+// track matching a detail's videoID (source data is never clobbered). It mutates
+// tracks in place.
+func applyDetailsToTracks(tracks []model.Track, details []enrich.Detail) {
+	byID := make(map[string]enrich.Detail, len(details))
+	for _, d := range details {
+		byID[d.VideoID] = d
+	}
+	for i := range tracks {
+		d, ok := byID[tracks[i].VideoID]
+		if !ok {
+			continue
+		}
+		if tracks[i].Album == "" {
+			tracks[i].Album = d.Album
+		}
+		if tracks[i].AlbumID == "" {
+			tracks[i].AlbumID = d.AlbumID
+		}
+		if tracks[i].Duration == 0 {
+			tracks[i].Duration = d.Duration
+		}
+	}
+}
+
+// recordHistoryCmd records a track to the local play history off the Update
+// goroutine. A nil history store or an empty-VideoID track is a no-op (nil Cmd).
+func (m *Model) recordHistoryCmd(t model.Track) tea.Cmd {
+	if m.hist == nil || t.VideoID == "" {
+		return nil
+	}
+	h := m.hist
+	return func() tea.Msg {
+		_ = h.Record(t)
+		return nil
+	}
 }
 
 // mergeSearchAlbums builds the rendered Albums section: the albums derived from
@@ -1966,6 +2303,16 @@ func (m Model) authIndicator() string {
 	return m.th.Muted().Render("○ not signed in")
 }
 
+// artistLabels formats the Library "Artists" rows as "♪ <name> (<n>)", where n
+// is how many of the user's library tracks are attributed to that artist.
+func artistLabels(groups []ytdata.ArtistGroup) []string {
+	out := make([]string, len(groups))
+	for i, g := range groups {
+		out[i] = fmt.Sprintf("♪ %s (%d)", g.Name, len(g.Tracks))
+	}
+	return out
+}
+
 func indexOf(names []string, want string) int {
 	for i, n := range names {
 		if n == want {
@@ -2033,6 +2380,10 @@ func (m Model) View() string {
 		mainBox = panels.AlbumView(m.th, "4 "+top.title, top.album, top.tracks, top.cursor, cover, playingID, mainW, mainH, mainFocused)
 	case mainSearch:
 		mainBox = panels.SearchView(m.th, "4 "+top.title, top.tracks, top.albums, top.cursor, playingID, mainW, mainH, mainFocused)
+	case mainArtists:
+		mainBox = panels.ArtistListView(m.th, "4 "+top.title, artistLabels(top.groups), top.cursor, mainW, mainH, mainFocused)
+	case mainAlbums:
+		mainBox = panels.AlbumListView(m.th, "4 "+top.title, top.albums, top.cursor, mainW, mainH, mainFocused)
 	default:
 		mainBox = panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, mainH, mainFocused)
 	}
@@ -2190,7 +2541,10 @@ func (m Model) contextHints() []hint {
 		case top.kind == mainAlbum:
 			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play from here"},
 				{k.Esc.Help().Key, "back"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
-		case top.kind == mainSearch && top.cursor >= len(top.tracks):
+		case top.kind == mainArtists:
+			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "show tracks"},
+				{"1-4/hl", "focus"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+		case (top.kind == mainSearch || top.kind == mainAlbums) && top.cursor >= len(top.tracks):
 			// An album row is selected.
 			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play album"},
 				{k.Open.Help().Key, "open album"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}

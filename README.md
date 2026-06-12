@@ -24,17 +24,37 @@ playlist-backed queue, CLI control, and gapless prefetch), and the pixel-art
 renderer work end to end. The YT Music API client wires unauthenticated
 song/album search and album browsing into the search view. For a **signed-in**
 session it also loads your real library: the Playlists panel fills with your
-playlists on startup, Library → "Liked Songs" loads your Liked Songs, and opening
-a playlist loads its tracks (first page, ~100 tracks each; radio not yet). The
-library is read through the official **YouTube Data API** when you sign in with
-OAuth (durable, no cookie rotation), or through cookies when you sign in that
-way; search and playback always use the cookie/anonymous InnerTube client. An
-**anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
-remaining Library sections (Albums/Artists/Songs/History) are still mock.
-Library tracks loaded over the Data API show no album column or duration (the
-Data API does not expose them; the duration fills in from mpv once a track
-plays), and the Data API library differs slightly in content from a cookie
-session — see the OAuth caveats under [Signing in](#signing-in).
+playlists on startup, Library → "Liked Songs" loads your Liked Songs, opening
+a playlist loads its tracks, and the remaining Library sections are wired off
+your library too (radio not yet). The library is read through the official
+**YouTube Data API** when you sign in with OAuth (durable, no cookie rotation),
+or through cookies when you sign in that way; search and playback always use the
+cookie/anonymous InnerTube client. An **anonymous** session keeps the demo/mock
+library and toasts a sign-in hint.
+
+The Library sections behave like this (all derived honestly from what the APIs
+actually expose):
+
+- **Liked Songs** — your Liked Songs (first pages today; full pagination is on).
+- **Songs** — your *whole library* aggregated: Liked Songs plus every owned
+  playlist's tracks, deduped. Derived from your library, not a separate API.
+- **Artists** — that same aggregate grouped by each track's primary artist
+  (`♪ <name> (<n>)`); `enter` drills into an artist's tracks. (The Data API can't
+  reach YT Music's artist pages, so this grouping is the honest substitute.)
+- **Albums** — the aggregate grouped by album. The Data API exposes neither a
+  song's album nor its duration, so tubeamp fills those in via **anonymous
+  InnerTube** lookups, cached permanently on disk. The list therefore **fills in
+  progressively** the first time (watch "enriching albums… N/M" on the status
+  line) and is instant on later visits. `enter`/`o` on an album opens it.
+- **History** — tubeamp's **own local play history** (most-recent first), not
+  YouTube's: Google removed watch-history from the public APIs, so this is just
+  what you've played in tubeamp, recorded on disk.
+
+Library tracks loaded over the Data API initially show no album column or
+duration (the Data API does not expose them; the duration fills in from mpv once
+a track plays, and the album/duration fill in permanently once enriched), and the
+Data API library differs slightly in content from a cookie session — see the
+OAuth caveats under [Signing in](#signing-in).
 
 Time-synced lyrics are surfaced in a panel below the main view while a track
 plays: LRC fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube

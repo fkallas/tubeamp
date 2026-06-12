@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
+	"github.com/fkallas/tubeamp/internal/enrich"
+	"github.com/fkallas/tubeamp/internal/history"
 	"github.com/fkallas/tubeamp/internal/model"
 	"github.com/fkallas/tubeamp/internal/theme"
 	"github.com/fkallas/tubeamp/internal/ytm"
@@ -23,7 +26,7 @@ import (
 // given size. It touches neither the real HOME nor the network.
 func newTestModel(t *testing.T, w, h int) Model {
 	t.Helper()
-	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue(), nil, nil, nil)
 	return send(m, tea.WindowSizeMsg{Width: w, Height: h})
 }
 
@@ -36,17 +39,20 @@ type fakeLibrary struct {
 	playlists []model.Playlist
 	liked     []model.Track
 	tracks    map[string][]model.Track // by playlist id
+	aggregate []model.Track            // LibrarySongs (the whole-library aggregate)
 
-	accountErr  error
-	playlistErr error
-	likedErr    error
-	tracksErr   error
+	accountErr   error
+	playlistErr  error
+	likedErr     error
+	tracksErr    error
+	aggregateErr error
 
 	accountCalls   int
 	playlistCalls  int
 	likedCalls     int
 	playlistID     string // last id passed to PlaylistTracks
 	playlistTracks int
+	aggregateCalls int
 }
 
 func (f *fakeLibrary) AccountInfo(context.Context) (string, bool, error) {
@@ -68,6 +74,14 @@ func (f *fakeLibrary) PlaylistTracks(_ context.Context, id string) ([]model.Trac
 	f.playlistTracks++
 	f.playlistID = id
 	return f.tracks[id], f.tracksErr
+}
+
+// LibrarySongs makes the fake satisfy librarySongsProvider (the optional
+// aggregate seam the OAuth Data API client implements), backing the derived
+// Songs/Artists/Albums sections.
+func (f *fakeLibrary) LibrarySongs(context.Context) ([]model.Track, error) {
+	f.aggregateCalls++
+	return f.aggregate, f.aggregateErr
 }
 
 // send dispatches one message and returns the updated model.
@@ -967,7 +981,7 @@ func TestDerivedAlbumsOrderedFirstAndDeduped(t *testing.T) {
 // renders without an empty "()" segment and that opening it (GetAlbum) fills the
 // year on the album view — the fallback must not regress the album flow.
 func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	derived := model.Album{BrowseID: "MPREb_derived", Title: "Derived Album", Artists: []string{"Some Artist"}, ThumbURL: "https://lh3.googleusercontent.com/x"}
@@ -1007,7 +1021,7 @@ func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
 // locally — a mock ID like "focus" must never reach a real PlaylistTracks
 // browse (browseId "VLfocus").
 func TestPlaylistEnterWhilePanelStillMockPlaysMock(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{}, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	if !m.canLoadLibrary() {
@@ -1029,7 +1043,7 @@ func TestPlaylistEnterWhilePanelStillMockPlaysMock(t *testing.T) {
 // TestPlaylistEnterRealAfterPanelFilled asserts the real browse path engages
 // only once the panel holds real playlists.
 func TestPlaylistEnterRealAfterPanelFilled(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{}, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	m.plGen = 1
@@ -1053,7 +1067,7 @@ func TestPlaylistEnterRealAfterPanelFilled(t *testing.T) {
 // behavior: with a client present but the session resolved anonymous, opening a
 // (mock) playlist loads the mock tracks AND toasts the sign-in hint.
 func TestPlaylistEnterAnonymousToastsSignInHint(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{signedIn: false})
 
@@ -1072,7 +1086,7 @@ func TestPlaylistEnterAnonymousToastsSignInHint(t *testing.T) {
 // Songs load in flight when the user issues a new search must be dropped — its
 // late result may not setMain over (and so destroy) the search-results frame.
 func TestSearchInvalidatesPendingLibraryLoad(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{})
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), &fakeLibrary{}, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 
@@ -1410,7 +1424,7 @@ func TestAlbumViewSurvivesLateLibraryLoad(t *testing.T) {
 // TestOpenAlbumFromSongRow: 'o' on a song row carrying an AlbumID fires a
 // GetAlbum and, when the result arrives, pushes the album view.
 func TestOpenAlbumFromSongRow(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	// A plain track list (e.g. Liked Songs) whose song carries its album id.
@@ -1442,7 +1456,7 @@ func TestOpenAlbumFromSongRow(t *testing.T) {
 // TestOpenAlbumFromSongRowNoAlbumID: 'o' on a song with no AlbumID toasts and
 // pushes nothing.
 func TestOpenAlbumFromSongRowNoAlbumID(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	m.setMain("Liked Songs", []model.Track{
@@ -1466,7 +1480,7 @@ func TestOpenAlbumFromSongRowNoAlbumID(t *testing.T) {
 
 // TestOpenAlbumFromQueueRow: 'o' on a queue row opens the song's album too.
 func TestOpenAlbumFromQueueRow(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	m.q.Set([]model.Track{
@@ -1492,7 +1506,7 @@ func TestOpenAlbumFromQueueRow(t *testing.T) {
 // TestOpenAlbumFromAlbumRowStillWorks: 'o' on a search-results album row keeps
 // opening that album by its own browseId (unchanged behavior).
 func TestOpenAlbumFromAlbumRowStillWorks(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	row := model.Album{BrowseID: "MPREb_row", Title: "Row Album", Artists: []string{"A"}}
@@ -1526,7 +1540,7 @@ func TestOpenAlbumFromAlbumRowStillWorks(t *testing.T) {
 // neither touches the network.
 func newLibModel(t *testing.T, lib libraryProvider) Model {
 	t.Helper()
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), lib)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), lib, nil, nil)
 	return send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 }
 
@@ -1690,7 +1704,7 @@ func TestLibProviderOpenPlaylistCallsPlaylistTracks(t *testing.T) {
 // interface) but a search client present, "Liked Songs" enter keeps the mock
 // data and toasts the sign-in hint — and canLoadLibrary stays false.
 func TestNilLibKeepsMockAndSignInHint(t *testing.T) {
-	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
 	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	if m.canLoadLibrary() {
@@ -1736,5 +1750,245 @@ func TestDataAPITrackRendersWithoutAlbumOrDuration(t *testing.T) {
 	pv := ansi.Strip(m.View())
 	if !strings.Contains(pv, "--:--") {
 		t.Errorf("player bar did not render --:-- for an unknown duration:\n%s", pv)
+	}
+}
+
+// ── Derived Library sections: Songs / Artists (whole-library aggregate) ───────
+
+// TestLibProviderSongsSectionFills asserts Library→"Songs" enter loads the whole
+// -library aggregate (lib.LibrarySongs) into the focused main view, titled "Songs".
+func TestLibProviderSongsSectionFills(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "Aggregate One", Artists: []string{"Artist A"}},
+		{VideoID: "v2", Title: "Aggregate Two", Artists: []string{"Artist B"}},
+	}}
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Songs")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on Songs dispatched no LibrarySongs command")
+	}
+	m = send(m, cmd())
+
+	if f.aggregateCalls != 1 {
+		t.Errorf("lib.LibrarySongs called %d times, want 1", f.aggregateCalls)
+	}
+	if m.FocusedPanel() != "Main" {
+		t.Fatalf("Songs load did not focus the main view; focus=%q", m.FocusedPanel())
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Songs" || len(top.tracks) != 2 {
+		t.Fatalf("main frame = {title:%q tracks:%d}, want {Songs, 2}", top.title, len(top.tracks))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Aggregate One") {
+		t.Errorf("Songs view missing an aggregate track")
+	}
+}
+
+// TestLibProviderArtistsSectionGroupsAndDrillsIn asserts Library→"Artists" shows
+// the aggregate grouped by primary artist as "♪ <name> (<n>)" rows, and that
+// enter on an artist pushes that artist's tracks (titled the artist name).
+func TestLibProviderArtistsSectionGroupsAndDrillsIn(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "Queen Song 1", Artists: []string{"Queen"}},
+		{VideoID: "v2", Title: "Bowie Song", Artists: []string{"David Bowie"}},
+		{VideoID: "v3", Title: "Queen Song 2", Artists: []string{"Queen"}},
+	}}
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Artists")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on Artists dispatched no command")
+	}
+	m = send(m, cmd())
+
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainArtists {
+		t.Fatalf("top frame kind = %v, want mainArtists", top.kind)
+	}
+	if len(top.groups) != 2 {
+		t.Fatalf("artist groups = %d, want 2 (Queen + David Bowie)", len(top.groups))
+	}
+	v := ansi.Strip(m.View())
+	// Grouped + sorted case-insensitively by name: David Bowie (1), Queen (2).
+	if !strings.Contains(v, "♪ David Bowie (1)") || !strings.Contains(v, "♪ Queen (2)") {
+		t.Errorf("artist rows missing in:\n%s", v)
+	}
+
+	// Drill into Queen (index 1 after the sort): enter pushes its 2 tracks.
+	m.setFocus(focusMain)
+	m.stack[len(m.stack)-1].cursor = 1
+	m = send(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	top = m.stack[len(m.stack)-1]
+	if top.kind != mainTracks || top.title != "Queen" || len(top.tracks) != 2 {
+		t.Fatalf("artist drill-in = {kind:%v title:%q tracks:%d}, want {mainTracks, Queen, 2}", top.kind, top.title, len(top.tracks))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Queen Song 1") {
+		t.Errorf("artist track list missing a Queen song")
+	}
+}
+
+// TestLibProviderNilKeepsDerivedSectionsMock asserts that with no library source
+// the derived sections (Songs/Artists/Albums) keep the mock data and toast the
+// sign-in hint (a search client is present), dispatching no network command.
+func TestLibProviderNilKeepsDerivedSectionsMock(t *testing.T) {
+	base := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, nil, nil)
+	base = send(base, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	for _, section := range []string{"Songs", "Artists", "Albums"} {
+		m := base
+		m.libCursor = indexOf(m.libItems, section)
+		mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = mm.(Model)
+		if cmd != nil {
+			t.Errorf("%s: nil library dispatched a command", section)
+		}
+		if !strings.Contains(m.status, "sign in to load your library") {
+			t.Errorf("%s: status = %q, want the sign-in hint", section, m.status)
+		}
+		top := m.stack[len(m.stack)-1]
+		if len(top.tracks) == 0 && len(top.albums) == 0 && len(top.groups) == 0 {
+			t.Errorf("%s: nil library showed no mock content", section)
+		}
+	}
+}
+
+// ── Albums section (background enrichment) + History + recording ─────────────
+
+// TestLibProviderAlbumsSectionEnrichesProgressively asserts Library→"Albums"
+// shows the albums derived from the (pre-enriched) aggregate immediately, and
+// that an enrich-result message resolving another track's album grows the list.
+func TestLibProviderAlbumsSectionEnrichesProgressively(t *testing.T) {
+	// Two tracks already carry their album; the third has none until enriched.
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "Track One", Artists: []string{"A"}, Album: "Album X", AlbumID: "MPRE_x"},
+		{VideoID: "v2", Title: "Track Two", Artists: []string{"A"}, Album: "Album X", AlbumID: "MPRE_x"},
+		{VideoID: "v3", Title: "Track Three", Artists: []string{"B"}},
+	}}
+	// enr is nil here: no live fetch fires, and the enrich-result is fed by hand
+	// to exercise the progressive-update path deterministically.
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Albums")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on Albums dispatched no LibrarySongs command")
+	}
+	m = send(m, cmd())
+
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainAlbums {
+		t.Fatalf("top frame kind = %v, want mainAlbums", top.kind)
+	}
+	// The two pre-enriched tracks collapse to a single album immediately.
+	if len(top.albums) != 1 || top.albums[0].BrowseID != "MPRE_x" {
+		t.Fatalf("initial albums = %+v, want one MPRE_x", top.albums)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Album X") {
+		t.Errorf("Albums view missing the pre-enriched album")
+	}
+
+	// A background enrichment result resolves the third track's album.
+	m = send(m, enrichResultMsg{gen: m.libGen, details: []enrich.Detail{
+		{VideoID: "v3", Album: "Album Y", AlbumID: "MPRE_y"},
+	}})
+	top = m.stack[len(m.stack)-1]
+	if len(top.albums) != 2 {
+		t.Fatalf("after enrich, albums = %d, want 2 (progressive update)", len(top.albums))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Album Y") {
+		t.Errorf("Albums view did not reflect the progressively-enriched album")
+	}
+}
+
+// TestEnrichResultStaleIgnored asserts a background enrichment result whose
+// generation no longer matches (the user changed section) is dropped.
+func TestEnrichResultStaleIgnored(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "T1", Artists: []string{"A"}, Album: "Album X", AlbumID: "MPRE_x"},
+		{VideoID: "v3", Title: "T3", Artists: []string{"B"}},
+	}}
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Albums")
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	m = send(m, cmd())
+
+	before := len(m.stack[len(m.stack)-1].albums)
+	m = send(m, enrichResultMsg{gen: m.libGen - 1, details: []enrich.Detail{
+		{VideoID: "v3", Album: "Album Y", AlbumID: "MPRE_y"},
+	}})
+	if got := len(m.stack[len(m.stack)-1].albums); got != before {
+		t.Errorf("stale enrich result changed the album list: %d -> %d", before, got)
+	}
+}
+
+// TestLibProviderHistorySectionListsRecorded asserts Library→"History" reads the
+// local play-history store into the main view (no network command).
+func TestLibProviderHistorySectionListsRecorded(t *testing.T) {
+	hist := history.New(filepath.Join(t.TempDir(), "history.json"))
+	if err := hist.Record(model.Track{VideoID: "h1", Title: "Recently Played"}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), nil, hist, nil)
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.libCursor = indexOf(m.libItems, "History")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd != nil {
+		t.Errorf("History enter dispatched a command (the local store reads synchronously)")
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "History" || len(top.tracks) != 1 {
+		t.Fatalf("History frame = {title:%q tracks:%d}, want {History, 1}", top.title, len(top.tracks))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Recently Played") {
+		t.Errorf("History view missing the recorded track")
+	}
+}
+
+// TestPlayTransitionRecordsHistory asserts a now-playing transition records the
+// track in the local history via a Cmd (off reflectCurrent, not blocking Update).
+func TestPlayTransitionRecordsHistory(t *testing.T) {
+	hist := history.New(filepath.Join(t.TempDir(), "history.json"))
+	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue(), nil, hist, nil)
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Empty ThumbURL => no art fetch; a pre-seeded lyrics cache entry suppresses
+	// the lyrics fetch, so the now-playing transition's only Cmd is the record.
+	tr := model.Track{VideoID: "vrec", Title: "Recorded Song"}
+	m.lyricsCache[tr.VideoID] = lyricResult{status: lyricResolved}
+	m.q.Set([]model.Track{tr}, 0)
+
+	cmd := m.reflectCurrent(true)
+	if cmd == nil {
+		t.Fatal("now-playing transition produced no command")
+	}
+	cmd() // run the record
+
+	got := hist.List()
+	if len(got) != 1 || got[0].VideoID != "vrec" {
+		t.Fatalf("history after play = %+v, want a single vrec entry", got)
+	}
+}
+
+// TestNilHistoryNoRecordCmd asserts the now-playing transition is nil-safe with
+// no history store (recordHistoryCmd returns nil; art/lyrics are also suppressed).
+func TestNilHistoryNoRecordCmd(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, nil, core.NewQueue(), nil, nil, nil)
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	tr := model.Track{VideoID: "vrec", Title: "Song"}
+	m.lyricsCache[tr.VideoID] = lyricResult{status: lyricResolved}
+	m.q.Set([]model.Track{tr}, 0)
+	if cmd := m.reflectCurrent(true); cmd != nil {
+		t.Errorf("with no history store the transition should produce no command")
 	}
 }
