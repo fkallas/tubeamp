@@ -40,15 +40,6 @@ func stubAuthImportSource(t *testing.T, header, source string, name string, sign
 	t.Cleanup(func() { authImport, confirmSignIn = origImport, origConfirm })
 }
 
-// stubBrowserRunning pins the running-browser detection so the -auth message is
-// deterministic in tests (the real check shells out to pgrep).
-func stubBrowserRunning(t *testing.T, running bool) {
-	t.Helper()
-	orig := browserRunning
-	browserRunning = func(string) bool { return running }
-	t.Cleanup(func() { browserRunning = orig })
-}
-
 // TestRunAuthImport_signedIn: a successful import writes the auth file (0600),
 // persists the browser to config, prints "signed in as <name>", and never leaks
 // the cookie value to stdout/stderr.
@@ -105,72 +96,38 @@ func TestRunAuthImport_signedIn(t *testing.T) {
 }
 
 // TestRunAuthImport_anonymous: a successful import that still resolves anonymous
-// while the browser is NOT running prints the are-you-logged-in hint.
+// prints the sign-in hint naming the browser (and never claims a running-browser
+// staleness problem, which the yt-dlp reader does not have).
 func TestRunAuthImport_anonymous(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	stubAuthImport(t, "SAPISID=x", nil, "", false)
-	stubBrowserRunning(t, false)
 
 	var out, errOut bytes.Buffer
 	if code := runAuthImport(&out, &errOut, config.Default(), "firefox"); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	got := out.String()
-	if !strings.Contains(got, "still resolved anonymous") || !strings.Contains(got, "firefox") {
+	if !strings.Contains(got, "anonymous") || !strings.Contains(got, "firefox") {
 		t.Errorf("stdout = %q, want anonymous hint mentioning firefox", got)
 	}
 	if strings.Contains(got, "is running") {
-		t.Errorf("stdout = %q: must not give the quit-and-retry advice when the browser is not running", got)
-	}
-}
-
-// TestRunAuthImport_anonymousRunning: a successful import that resolves anonymous
-// while the browser IS running replaces the "are you logged in?" line with the
-// quit-the-browser-and-retry advice (a running browser holds fresh cookies in
-// memory/WAL, so the on-disk snapshot is stale).
-func TestRunAuthImport_anonymousRunning(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", tmp)
-	t.Setenv("XDG_CONFIG_HOME", tmp)
-
-	stubAuthImport(t, "SAPISID=x", nil, "", false)
-	stubBrowserRunning(t, true)
-
-	var out, errOut bytes.Buffer
-	if code := runAuthImport(&out, &errOut, config.Default(), "firefox"); code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	got := out.String()
-	if !strings.Contains(got, "firefox is running") || !strings.Contains(got, "Quit firefox") {
-		t.Errorf("stdout = %q, want the quit-and-retry advice for a running browser", got)
-	}
-	if strings.Contains(got, "are you logged into") {
-		t.Errorf("stdout = %q: the running-browser case must replace the are-you-logged-in line", got)
+		t.Errorf("stdout = %q: must not give running-browser advice (yt-dlp reads running browsers fine)", got)
 	}
 }
 
 // TestRunAuthImport_autoAttributesSource: the default bare `-auth` (auto) path
 // must attribute the import to the browser whose store actually supplied the
-// cookies — the running check inspects THAT browser, the advice names it (never
-// the literal "auto"), and config remembers it as the re-import source. This is
-// the regression test for the running-browser advice never firing on auto.
+// cookies — the advice names it (never the literal "auto"), and config remembers
+// it as the re-import source.
 func TestRunAuthImport_autoAttributesSource(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	stubAuthImportSource(t, "SAPISID=x", "chrome", "", false)
-
-	var checked []string
-	origRunning := browserRunning
-	browserRunning = func(b string) bool {
-		checked = append(checked, b)
-		return b == "chrome" // only the attributed source is "running"
-	}
-	t.Cleanup(func() { browserRunning = origRunning })
 
 	cfg := config.Default()
 	var out, errOut bytes.Buffer
@@ -179,14 +136,11 @@ func TestRunAuthImport_autoAttributesSource(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "chrome is running") || !strings.Contains(got, "Quit chrome") {
-		t.Errorf("stdout = %q, want the quit-and-retry advice attributed to chrome", got)
+	if !strings.Contains(got, "chrome") {
+		t.Errorf("stdout = %q, want the advice attributed to the resolved source chrome", got)
 	}
 	if strings.Contains(got, "auto") {
 		t.Errorf("stdout = %q: must never interpolate the literal \"auto\" as a browser name", got)
-	}
-	if len(checked) != 1 || checked[0] != "chrome" {
-		t.Errorf("browserRunning checked %v, want exactly [chrome] (the attributed source)", checked)
 	}
 	if cfg.AuthBrowser != "chrome" {
 		t.Errorf("cfg.AuthBrowser = %q, want the resolved source chrome (not auto)", cfg.AuthBrowser)
@@ -194,27 +148,17 @@ func TestRunAuthImport_autoAttributesSource(t *testing.T) {
 }
 
 // TestAnonymousAdvice covers the pure message selector: signed-in => no advice;
-// anonymous + running => quit-and-retry; anonymous + not running => sign-in hint.
+// anonymous => a sign-in hint naming the browser, with no running-browser claim.
 func TestAnonymousAdvice(t *testing.T) {
-	if got := anonymousAdvice("chrome", true, true); got != "" {
+	if got := anonymousAdvice("chrome", true); got != "" {
 		t.Errorf("signed-in advice = %q, want empty", got)
 	}
-	if got := anonymousAdvice("chrome", false, true); got != "" {
-		t.Errorf("signed-in advice (not running) = %q, want empty", got)
+	anon := anonymousAdvice("chrome", false)
+	if !strings.Contains(anon, "anonymous") || !strings.Contains(anon, "chrome") || !strings.Contains(anon, "tubeamp -auth chrome") {
+		t.Errorf("anonymous advice = %q, want a sign-in hint naming chrome", anon)
 	}
-	running := anonymousAdvice("chrome", true, false)
-	if !strings.Contains(running, "chrome is running") || !strings.Contains(running, "Quit chrome") || !strings.Contains(running, "tubeamp -auth chrome") {
-		t.Errorf("running advice = %q, want quit-and-retry guidance", running)
-	}
-	if strings.Contains(running, "are you logged into") {
-		t.Errorf("running advice = %q: must not include the are-you-logged-in line", running)
-	}
-	notRunning := anonymousAdvice("chrome", false, false)
-	if !strings.Contains(notRunning, "are you logged into chrome") {
-		t.Errorf("not-running advice = %q, want the are-you-logged-in hint", notRunning)
-	}
-	if strings.Contains(notRunning, "is running") {
-		t.Errorf("not-running advice = %q: must not claim the browser is running", notRunning)
+	if strings.Contains(anon, "is running") {
+		t.Errorf("anonymous advice = %q: must not claim the browser is running", anon)
 	}
 }
 

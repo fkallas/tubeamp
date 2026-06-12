@@ -1,52 +1,58 @@
 // Package auth imports a YouTube Music sign-in from a local browser profile.
 //
 // Instead of hand-copying the Cookie header out of devtools (see the manual
-// method in the README), tubeamp can read the YouTube/Google sign-in cookies
-// straight out of a browser's cookie store via kooky and assemble the canonical
-// Cookie header tubeamp's InnerTube client sends. This backs both
-// `tubeamp -auth <browser>` and the UI's one-shot stale-session auto-refresh.
+// method in the README), tubeamp reads the YouTube/Google sign-in cookies
+// straight out of a browser via yt-dlp's --cookies-from-browser extractor and
+// assembles the canonical Cookie header tubeamp's InnerTube client sends. This
+// backs both `tubeamp -auth <browser>` and the UI's one-shot stale-session
+// auto-refresh.
+//
+// yt-dlp (already a hard tubeamp dependency, for playback) is used as the reader
+// rather than a native cookie-store library because it handles every awkward
+// case correctly: a RUNNING browser (it reads the live SQLite WAL, not just the
+// stale on-disk snapshot a naive reader sees), profile selection, and the full
+// Chrome-family decryption (macOS Keychain, Linux keyrings, app-bound
+// encryption). An on-disk snapshot read by a naive library while the browser is
+// open yields cookies that resolve anonymous even for a signed-in user; yt-dlp
+// avoids that, which is why it is the reader here.
 //
 // AssembleCookieHeader (the pure, fixture-tested core) is split from
-// ImportFromBrowser (the kooky-backed reader) so the header assembly can be
-// unit-tested without a real browser.
+// ImportFromBrowser (the yt-dlp-backed reader) so the header assembly and the
+// Netscape-jar parsing can be unit-tested without a real browser.
 package auth
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"runtime"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/browserutils/kooky"
-
-	// Register the cookie-store finders for exactly the browsers we support.
-	// Blank imports keep the kooky dependency surface scoped to these six
-	// stores rather than pulling in every browser via .../browser/all.
-	_ "github.com/browserutils/kooky/browser/brave"
-	_ "github.com/browserutils/kooky/browser/chrome"
-	_ "github.com/browserutils/kooky/browser/chromium"
-	_ "github.com/browserutils/kooky/browser/edge"
-	_ "github.com/browserutils/kooky/browser/firefox"
-	_ "github.com/browserutils/kooky/browser/safari"
 )
 
 // ErrNoSAPISID is returned when an assembled cookie set lacks the SAPISID (or
 // __Secure-3PAPISID) cookie the SAPISIDHASH authorization depends on — i.e. the
-// browser is not signed into a Google account, or the relevant cookies could not
-// be decrypted. It is the typed "no usable cookie set" error callers match with
-// errors.Is.
+// browser is not signed into a Google account. It is the typed "no usable cookie
+// set" error callers match with errors.Is.
 var ErrNoSAPISID = errors.New("auth: no SAPISID cookie found (is the browser signed into YouTube?)")
 
-// ErrNoStore is returned when no cookie store can be found for the requested
-// browser (it is not installed, or no finder is registered for it).
-var ErrNoStore = errors.New("auth: no cookie store found")
+// ErrNoStore is returned when no usable cookie set can be extracted from the
+// requested browser (it is not installed, or yt-dlp could not read it).
+var ErrNoStore = errors.New("auth: no usable browser cookies found")
 
-// supportedBrowsers are the browser identifiers kooky's finders register under
-// and that ImportFromBrowser accepts (besides "" / "auto").
+// ErrYTDLPMissing is returned when the yt-dlp binary is not on PATH. yt-dlp is a
+// hard tubeamp dependency (it also resolves playback streams), so this normally
+// cannot happen, but the import surfaces it cleanly.
+var ErrYTDLPMissing = errors.New("auth: yt-dlp not found on PATH (required to read browser cookies; install it: brew install yt-dlp)")
+
+// supportedBrowsers are the browser identifiers ImportFromBrowser accepts
+// (besides "" / "auto"). They match yt-dlp's --cookies-from-browser names.
 var supportedBrowsers = map[string]bool{
 	"chrome":   true,
 	"chromium": true,
@@ -54,13 +60,20 @@ var supportedBrowsers = map[string]bool{
 	"brave":    true,
 	"firefox":  true,
 	"safari":   true,
+	"opera":    true,
+	"vivaldi":  true,
 }
+
+// autoOrder is the sequence the "auto" import tries browsers in: the popular
+// ones first. The first browser that yields a signed-in (SAPISID-bearing) cookie
+// set wins.
+var autoOrder = []string{"firefox", "chrome", "brave", "edge", "chromium", "vivaldi", "opera", "safari"}
 
 // cookieOrder is the canonical emission order for the known sign-in cookies. Any
 // gathered cookie not listed here is appended afterwards in alphabetical order,
-// so the assembled header is fully deterministic regardless of the browser
-// store's own ordering. The order is cosmetic — YouTube does not require a
-// specific one — but determinism keeps the header stable and testable.
+// so the assembled header is fully deterministic regardless of the jar's own
+// ordering. The order is cosmetic — YouTube does not require a specific one — but
+// determinism keeps the header stable and testable.
 var cookieOrder = []string{
 	"VISITOR_INFO1_LIVE",
 	"VISITOR_PRIVACY_METADATA",
@@ -90,7 +103,7 @@ var cookieOrder = []string{
 //
 // It returns ErrNoSAPISID when the result lacks a SAPISID/__Secure-3PAPISID
 // cookie, since that cookie is required to sign InnerTube requests; this is how a
-// logged-out (or undecryptable) cookie set is detected.
+// logged-out cookie set is detected.
 func AssembleCookieHeader(cookies []*http.Cookie) (string, error) {
 	values := make(map[string]string)
 	for _, c := range cookies {
@@ -132,181 +145,155 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error) {
 	return strings.Join(parts, "; "), nil
 }
 
-// storeReader is the slice of a cookie store's behaviour the profile selector
-// needs: assemble the store's Cookie header (ErrNoSAPISID when it holds no
-// session), report whether it is the browser's default profile, and name the
-// browser it belongs to (so the "auto" import can attribute the winning store).
-// kooky's CookieStore satisfies it via kookyStore; tests inject fakes.
-type storeReader interface {
-	header(ctx context.Context) (string, error)
-	isDefaultProfile() bool
-	browserName() string
-}
-
-// kookyStore adapts a kooky.CookieStore to storeReader. It does not close the
-// underlying store; ImportFromBrowser owns that (the selector may stop early).
-type kookyStore struct {
-	st      kooky.CookieStore
-	browser string
-}
-
-func (k *kookyStore) header(ctx context.Context) (string, error) {
-	return readStoreHeader(ctx, k.st, k.browser)
-}
-
-func (k *kookyStore) isDefaultProfile() bool { return k.st.IsDefaultProfile() }
-
-func (k *kookyStore) browserName() string { return k.browser }
-
-// pickStoreHeader assembles a Cookie header from the first usable store among
-// candidates, preferring the browser's DEFAULT profile when several profiles
-// carry a session. This stops a stale secondary profile (e.g. an old, empty
-// Firefox *.default beside the active *.default-release that profiles.ini marks
-// Default) from winning just because kooky iterated it first. The winning
-// store's browser name is returned alongside the header so an "auto" import can
-// attribute the session to a concrete browser.
+// parseNetscapeCookies parses a Netscape-format cookie jar (the format yt-dlp
+// writes) into http.Cookies, keeping only the YouTube/Google sign-in cookies.
+// Each data line is seven tab-separated fields:
 //
-// Selection: the first default-profile store that yields a SAPISID wins
-// outright; otherwise the first non-default store with a SAPISID is used (so a
-// session living only on a secondary profile is still found). When no store
-// holds a session, a real read error (e.g. a macOS Keychain denial) is surfaced
-// over the bare ErrNoSAPISID.
-func pickStoreHeader(ctx context.Context, stores []storeReader) (header, browser string, err error) {
-	var (
-		fallback        string
-		fallbackBrowser string
-		haveFallback    bool
-		lastErr         error
-	)
-	for _, s := range stores {
-		header, err := s.header(ctx)
-		if err != nil {
-			if !errors.Is(err, ErrNoSAPISID) {
-				lastErr = err // a genuine read failure, not just "no session"
-			}
+//	domain  includeSubdomains  path  secure  expiry  name  value
+//
+// Comment lines start with '#', EXCEPT yt-dlp/curl encode an HttpOnly cookie by
+// prefixing the domain with "#HttpOnly_" — those are real cookies, not comments.
+func parseNetscapeCookies(r *bufio.Scanner) []*http.Cookie {
+	var cookies []*http.Cookie
+	for r.Scan() {
+		line := r.Text()
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if s.isDefaultProfile() {
-			return header, s.browserName(), nil
+		if strings.HasPrefix(line, "#") {
+			if !strings.HasPrefix(line, "#HttpOnly_") {
+				continue // a genuine comment
+			}
+			line = strings.TrimPrefix(line, "#HttpOnly_")
 		}
-		if !haveFallback {
-			fallback, fallbackBrowser, haveFallback = header, s.browserName(), true
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
+			continue
 		}
+		domain, name, value := f[0], f[5], f[6]
+		if !relevantDomain(domain) {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{Name: name, Value: value, Domain: domain})
 	}
-	if haveFallback {
-		return fallback, fallbackBrowser, nil
-	}
-	if lastErr != nil {
-		return "", "", lastErr
-	}
-	return "", "", ErrNoSAPISID
+	return cookies
 }
 
 // ImportFromBrowser reads the YouTube/Google sign-in cookies from the named
-// browser's local cookie store and assembles them into the Cookie header tubeamp
-// sends. browser is one of "chrome", "chromium", "edge", "brave", "firefox" or
-// "safari"; "" or "auto" tries every supported store and returns the first that
-// yields a usable (SAPISID-bearing) set. sourceBrowser names the browser whose
-// store actually supplied the header (lowercase id, never "auto"; "" on error),
-// so callers on the auto path can attribute the session — e.g. the -auth command
-// checks whether THAT browser is running and names it in its advice.
+// browser via yt-dlp and assembles them into the Cookie header tubeamp sends.
+// browser is one of the supportedBrowsers ids; "" or "auto" tries each browser
+// in autoOrder and returns the first that yields a usable (SAPISID-bearing) set.
+// sourceBrowser names the browser that actually supplied the header (lowercase
+// id, never "auto"; "" on error), so callers on the auto path can attribute the
+// session and remember a concrete re-import source.
 //
-// When a browser exposes several profiles (e.g. Firefox's *.default and
-// *.default-release), the store whose cookie DB actually holds a session is
-// chosen, preferring the profile profiles.ini marks as the default — so a stale,
-// empty secondary profile never wins (see pickStoreHeader).
-//
-// Locked SQLite stores (a running Chrome) are handled by kooky, which reads
-// through a temporary copy, so a running browser does not block the read.
-// CAVEAT: that on-disk snapshot can be stale — a browser that is open keeps a
-// fresh login in memory and the SQLite WAL, so a genuinely-signed-in user can
-// still import cookies that resolve anonymous; quitting the browser first is the
-// fix (the -auth command says so when it detects the browser is running). On
-// macOS the Chrome-family stores are encrypted with a key held in the login
-// Keychain: the first read raises a consent prompt, and a denial (or Chrome's
-// newer app-bound encryption refusing external reads) is surfaced as a clear,
-// actionable error rather than a raw decryption failure.
-//
-// It returns ErrNoStore when no store is found for the requested browser and
-// ErrNoSAPISID (or the more informative read error) when stores were found but
-// none held a signed-in session.
+// Because the read goes through yt-dlp, a running browser is handled correctly
+// (the live cookies are read, not a stale snapshot) and Chrome-family
+// decryption "just works" (on macOS the first read may raise a Keychain consent
+// prompt). It returns ErrYTDLPMissing when yt-dlp is absent, ErrNoStore when the
+// requested browser yields nothing, and ErrNoSAPISID when cookies were read but
+// none carried a signed-in session.
 func ImportFromBrowser(browser string) (cookieHeader, sourceBrowser string, err error) {
 	want := strings.ToLower(strings.TrimSpace(browser))
 	if want == "auto" {
 		want = ""
 	}
 	if want != "" && !supportedBrowsers[want] {
-		return "", "", fmt.Errorf("auth: unsupported browser %q (want chrome, chromium, edge, brave, firefox or safari)", browser)
+		return "", "", fmt.Errorf("auth: unsupported browser %q (want chrome, chromium, edge, brave, firefox, safari, opera or vivaldi)", browser)
+	}
+	if _, err := exec.LookPath("yt-dlp"); err != nil {
+		return "", "", ErrYTDLPMissing
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	order := autoOrder
+	if want != "" {
+		order = []string{want}
+	}
 
-	stores := kooky.FindAllCookieStores(ctx)
-
-	var candidates []storeReader
-	for _, st := range stores {
-		if st == nil {
-			continue
+	var lastErr error
+	for _, b := range order {
+		header, err := importViaYTDLP(b)
+		if err == nil {
+			return header, b, nil
 		}
-		name := strings.ToLower(st.Browser())
+		// For an explicit single browser, surface its error directly. For "auto",
+		// keep the most informative error (a real read failure over a bare
+		// "no session") and keep trying the next browser.
 		if want != "" {
-			if name != want {
-				st.Close()
-				continue
-			}
-		} else if !supportedBrowsers[name] {
-			st.Close()
-			continue
+			return "", "", err
 		}
-		candidates = append(candidates, &kookyStore{st: st, browser: name})
+		if lastErr == nil || errors.Is(lastErr, ErrNoSAPISID) {
+			lastErr = err
+		}
 	}
-	// Close every store we kept once selection is done (pickStoreHeader may stop
-	// before reading them all).
-	defer func() {
-		for _, c := range candidates {
-			if ks, ok := c.(*kookyStore); ok {
-				ks.st.Close()
-			}
-		}
-	}()
-
-	if len(candidates) == 0 {
-		if want != "" {
-			return "", "", fmt.Errorf("%w for %q (is it installed?)", ErrNoStore, want)
-		}
-		return "", "", fmt.Errorf("%w: no supported browser detected", ErrNoStore)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("%w: no supported browser had a YouTube session", ErrNoStore)
 	}
-	return pickStoreHeader(ctx, candidates)
+	return "", "", lastErr
 }
 
-// readStoreHeader reads one cookie store, keeps only the YouTube/Google cookies,
-// and assembles the header. It does NOT close the store (the caller owns that).
-// A decryption failure on a Chrome-family store (a macOS Keychain denial, or
-// Chrome's app-bound encryption) is wrapped with an actionable hint.
-func readStoreHeader(ctx context.Context, st kooky.CookieStore, browser string) (string, error) {
-	all, readErr := st.TraverseCookies().ReadAllCookies(ctx)
-
-	cookies := make([]*http.Cookie, 0, len(all))
-	for _, c := range all {
-		if c == nil || !relevantDomain(c.Domain) {
-			continue
-		}
-		hc := c.Cookie // copy out the embedded http.Cookie; decouples us from kooky
-		cookies = append(cookies, &hc)
+// importViaYTDLP runs yt-dlp's cookie extractor for one browser into a temp jar
+// and assembles the header. yt-dlp needs a URL to act on; the YTM homepage with
+// --playlist-items 0 makes it load+write the jar with minimal work. yt-dlp exits
+// non-zero when there is nothing to download, so the exit code is ignored — the
+// written jar (or its absence) is the real signal.
+func importViaYTDLP(browser string) (string, error) {
+	// yt-dlp treats --cookies as BOTH an input and an output jar: it tries to
+	// LOAD the path first and rejects an empty/invalid file. So hand it a path
+	// that does not exist yet (inside a temp dir we own) and let it create the
+	// jar for output.
+	dir, err := os.MkdirTemp("", "tubeamp-cookies-")
+	if err != nil {
+		return "", fmt.Errorf("auth: temp cookie dir: %w", err)
 	}
+	defer os.RemoveAll(dir)
+	tmpPath := filepath.Join(dir, "cookies.txt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "yt-dlp",
+		"--cookies-from-browser", browser,
+		"--cookies", tmpPath,
+		"--simulate", "--skip-download", "--playlist-items", "0",
+		"--no-warnings",
+		"https://music.youtube.com/",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run() // exit code ignored; the jar is the signal
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		return "", browserReadErr(browser, &stderr)
+	}
+	defer f.Close()
+	cookies := parseNetscapeCookies(bufio.NewScanner(f))
 
 	header, err := AssembleCookieHeader(cookies)
 	if err != nil {
-		// When the assembly failed because nothing decrypted, the read error is
-		// the more informative one to surface (e.g. a Keychain denial leaves us
-		// with no cookies at all).
-		if readErr != nil {
-			return "", decorateReadErr(browser, readErr)
+		if errors.Is(err, ErrNoSAPISID) && stderr.Len() > 0 {
+			// yt-dlp wrote no usable cookies AND complained — its message
+			// (e.g. "could not find chrome cookies database", a Keychain denial)
+			// is the more actionable one to surface.
+			return "", browserReadErr(browser, &stderr)
 		}
 		return "", err
 	}
 	return header, nil
+}
+
+// browserReadErr builds an actionable error from a failed/empty yt-dlp read,
+// folding in yt-dlp's own stderr tail when present.
+func browserReadErr(browser string, stderr *bytes.Buffer) error {
+	msg := strings.TrimSpace(stderr.String())
+	if i := strings.LastIndexByte(msg, '\n'); i >= 0 {
+		msg = strings.TrimSpace(msg[i+1:]) // last line is usually the real error
+	}
+	if msg == "" {
+		return fmt.Errorf("%w: yt-dlp read no cookies from %s (is it installed and signed in?)", ErrNoStore, browser)
+	}
+	return fmt.Errorf("auth: could not read %s cookies via yt-dlp: %s", browser, msg)
 }
 
 // relevantDomain reports whether a cookie's domain belongs to YouTube or Google
@@ -317,24 +304,6 @@ func relevantDomain(domain string) bool {
 	case d == "youtube.com" || strings.HasSuffix(d, ".youtube.com"):
 		return true
 	case d == "google.com" || strings.HasSuffix(d, ".google.com"):
-		return true
-	default:
-		return false
-	}
-}
-
-// decorateReadErr wraps a cookie-store read error, adding macOS-specific guidance
-// for the Chrome family where decryption needs Keychain access.
-func decorateReadErr(browser string, err error) error {
-	if runtime.GOOS == "darwin" && isChromeFamily(browser) {
-		return fmt.Errorf("auth: could not read %s cookies — on macOS tubeamp needs Keychain access to decrypt them (allow the prompt); very recent Chrome may refuse external reads (app-bound encryption), in which case use Firefox or the manual cookie method: %w", browser, err)
-	}
-	return fmt.Errorf("auth: could not read %s cookies: %w", browser, err)
-}
-
-func isChromeFamily(browser string) bool {
-	switch browser {
-	case "chrome", "chromium", "edge", "brave":
 		return true
 	default:
 		return false

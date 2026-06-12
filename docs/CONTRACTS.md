@@ -21,9 +21,9 @@ it in your report — do not silently deviate.
   `github.com/charmbracelet/lipgloss`, `github.com/charmbracelet/bubbles/key`,
   `github.com/charmbracelet/bubbles/textinput`,
   `github.com/charmbracelet/x/ansi` (ANSI-aware splicing in the overlay
-  compositor; already in the module graph via lipgloss), `gopkg.in/yaml.v3`,
-  and `github.com/browserutils/kooky` (+ transitive deps) — used ONLY by
-  `internal/auth` to read browser cookie stores for `tubeamp -auth`.
+  compositor; already in the module graph via lipgloss), and `gopkg.in/yaml.v3`.
+  `internal/auth` shells out to the `yt-dlp` binary (already required for
+  playback) to read browser cookies for `tubeamp -auth` — no extra Go dependency.
 - Compile and test your own package before finishing:
   `go build ./internal/<pkg>/...` and `go test ./internal/<pkg>/...`.
   Run `gofmt -w` on your files.
@@ -438,54 +438,52 @@ playlist-shelf), each with one malformed item skipped.
 ## internal/auth
 
 One-command sign-in by importing the YouTube/Google cookies from a local browser
-profile (via `github.com/browserutils/kooky`), so users do not hand-copy a Cookie
-header out of devtools. `AssembleCookieHeader` (pure, fixture-tested) is split
-from `ImportFromBrowser` (kooky-backed) so the header assembly can be unit-tested
-without a real browser.
+**via yt-dlp's `--cookies-from-browser`** (yt-dlp is already a hard dependency for
+playback), so users do not hand-copy a Cookie header out of devtools.
+`AssembleCookieHeader` and `parseNetscapeCookies` (pure, fixture-tested) are split
+from `ImportFromBrowser` (the yt-dlp shell-out) so the parsing/assembly is
+unit-tested without a real browser.
+
+Why yt-dlp rather than a native cookie-store reader: yt-dlp reads the LIVE cookies
+(it applies the SQLite WAL), so a running browser is handled correctly — a naive
+on-disk-snapshot reader returns a stale set that resolves anonymous for a
+genuinely signed-in user. yt-dlp also handles profile selection and the full
+Chrome-family decryption (macOS Keychain, app-bound encryption). tubeamp's
+InnerTube request recipe is correct as-is; the ONLY auth failure mode that
+remains is cookie ROTATION (Google rotates `__Secure-*PSIDTS` within minutes), not
+request construction — verified by ytmusicapi resolving the same fresh/stale
+cookies identically.
 
 ```go
 // AssembleCookieHeader builds the canonical "name=value; …" Cookie header from a
 // set of browser cookies: dedupe by name (first non-empty wins), drop empties,
 // emit known sign-in cookies in a fixed canonical order then extras alphabetically.
-// Returns ErrNoSAPISID when no SAPISID/__Secure-3PAPISID is present (logged-out /
-// undecryptable set) — this is the typed "no usable cookie set" signal.
+// Returns ErrNoSAPISID when no SAPISID/__Secure-3PAPISID is present (logged-out
+// set) — this is the typed "no usable cookie set" signal.
 func AssembleCookieHeader(cookies []*http.Cookie) (string, error)
 
-// ImportFromBrowser reads the YouTube/Google sign-in cookies (domains
-// music.youtube.com / .youtube.com / .google.com) from the named browser's store
-// and assembles the Cookie header. browser ∈ {chrome,chromium,edge,brave,firefox,
-// safari}; "" or "auto" tries every supported store. sourceBrowser names the
-// browser whose store actually supplied the header (a concrete lowercase id,
-// never "auto"; "" on error), so the auto path can be attributed — the -auth
-// command uses it for the running check, the advice text, and the persisted
-// cfg.AuthBrowser. kooky reads locked SQLite
-// stores through a temp copy (a running browser does not block it) — but that
-// on-disk snapshot can be STALE: a browser that is open keeps a fresh login in
-// memory + the SQLite WAL, so a signed-in user can still import an anonymous set
-// (quitting the browser first is the fix; the -auth command detects this and
-// says so). On macOS the Chrome family needs Keychain access to decrypt; a denial
-// (or Chrome app-bound encryption) is surfaced as a clear, actionable error.
-// ErrNoStore when no store is found for the browser; ErrNoSAPISID (or the more
-// informative read error) when stores exist but none holds a session.
-//
-// PROFILE SELECTION: when a browser exposes several profiles, the store whose
-// cookie DB actually holds a SAPISID is chosen, preferring the profile
-// profiles.ini marks Default (Firefox's *.default-release) over an empty/stale
-// secondary (*.default) — so a stale profile never wins on iteration order. A
-// session living only on a non-default profile is still used when no default
-// profile carries one. This selection (pickStoreHeader, over an injectable
-// storeReader interface) is unit-tested with fake stores.
+// ImportFromBrowser shells out to `yt-dlp --cookies-from-browser <browser>` into a
+// temp Netscape jar (the jar path must NOT pre-exist — yt-dlp treats --cookies as
+// an input too and rejects an empty file; an MkdirTemp dir + non-existent file is
+// used), parses the .youtube.com/.google.com cookies, and assembles the header.
+// browser ∈ {chrome,chromium,edge,brave,firefox,safari,opera,vivaldi}; "" or
+// "auto" tries autoOrder and returns the first browser yielding a SAPISID-bearing
+// set. sourceBrowser names the browser that supplied the header (concrete
+// lowercase id, never "auto"; "" on error) — the -auth command uses it for the
+// advice text and the persisted cfg.AuthBrowser. ErrYTDLPMissing when yt-dlp is
+// absent; ErrNoStore when a browser yields nothing; ErrNoSAPISID when cookies were
+// read but none carried a session.
 func ImportFromBrowser(browser string) (cookieHeader, sourceBrowser string, err error)
 
-// IsBrowserRunning reports whether the named browser process is running
-// (pgrep on darwin/linux; checks "Google Chrome"/"firefox"/"Brave Browser"/
-// "Microsoft Edge"/"Safari"/"Chromium"). Strictly best-effort: an unsupported
-// browser, "" / "auto", a non-darwin/linux OS, or a missing pgrep all report
-// false. It only sharpens the -auth message and can never make the import fail.
+// IsBrowserRunning reports whether the named browser process is running (pgrep on
+// darwin/linux). Best-effort: unsupported browser / "" / "auto" / non-darwin-linux
+// / missing pgrep all report false. Retained as a utility; the -auth advice no
+// longer depends on it (yt-dlp reads running browsers fine).
 func IsBrowserRunning(browser string) bool
 
-var ErrNoSAPISID = errors.New(...) // no signing cookie in the set
-var ErrNoStore   = errors.New(...) // no cookie store found for the browser
+var ErrNoSAPISID    = errors.New(...) // no signing cookie in the set
+var ErrNoStore      = errors.New(...) // browser yielded no usable cookies
+var ErrYTDLPMissing = errors.New(...) // yt-dlp not on PATH
 ```
 
 A real-browser read is gated behind `TUBEAMP_LIVE_IMPORT=1` (`t.Skip` by default,

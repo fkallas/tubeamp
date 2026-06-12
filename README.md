@@ -27,17 +27,18 @@ a playlist loads its tracks (first page, ~100 tracks each; radio not yet). An
 **anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
 remaining Library sections (Albums/Artists/Songs/History) are still mock.
 
-Note: anonymous InnerTube **album** search only surfaces self-distributed
-releases — YouTube withholds the major-label catalog from logged-out clients
-(ytmusicapi behaves identically). Song search is unaffected, so tubeamp works
-around it: every song result carries its album's browseId, so the Albums section
-is reconstructed from the (full-catalog) song hits and shown first, with the
-degraded album-vertical results merged in after and deduped. Major-label albums
-therefore show up in search even anonymously. Signing in is supported (see
-[Signing in](#signing-in)) and tubeamp now shows your live sign-in state in the
-header; be aware that cookies copied from a logged-in browser frequently resolve
-as **anonymous** anyway, because Google rotates them within hours (see the
-cookie-rotation note below).
+Note: the InnerTube **album-search vertical** ranks oddly — it surfaces obscure
+self-distributed releases over the major-label catalog. This is **not** an auth
+problem (an authenticated session returns the same ranking; ytmusicapi behaves
+identically). tubeamp works around it independently of sign-in: every *song*
+result carries its album's browseId, so the Albums section is reconstructed from
+the (full-catalog) song hits and shown first, with the album-vertical results
+merged in after and deduped. Major-label albums therefore show up in search.
+Signing in (see [Signing in](#signing-in)) unlocks your *library* (Liked Songs,
+playlists) and is shown live in the header. Heads up: a cookie copied/imported
+from a logged-in browser resolves as **anonymous** within minutes because Google
+rotates session cookies continuously (see the cookie-rotation note below) — this
+is the one real gotcha, and the bulk of "why am I anonymous?" confusion.
 
 ## Requirements
 
@@ -129,55 +130,33 @@ header stored in a plain-text file:
 **Recommended: import from your browser (one command)**
 
 If you are already logged into YouTube Music in a browser, sign in with a single
-command — tubeamp reads the sign-in cookies straight out of the browser's cookie
-store and writes the auth file for you:
+command — tubeamp reads the sign-in cookies out of the browser (via yt-dlp's
+`--cookies-from-browser`, the same yt-dlp you already have for playback) and
+writes the auth file for you:
 
 ```sh
-tubeamp -auth chrome     # or: chromium, edge, brave, firefox, safari
+tubeamp -auth chrome     # or: chromium, edge, brave, firefox, safari, opera, vivaldi
 tubeamp -auth            # bare -auth = "auto": try every supported browser
 ```
 
-> **Quit the browser first.** The single most common reason a signed-in user
-> imports cookies that come back **anonymous** is that the browser is still
-> running: a fresh login lives in the browser's memory and the SQLite
-> write-ahead log, while tubeamp can only read the *on-disk snapshot*, which is
-> stale. **Fully quit the browser** (on macOS, Cmd-Q — not just closing the
-> window) before running `tubeamp -auth`. If you see the anonymous result and
-> the browser is still open, tubeamp now tells you exactly this and to retry
-> after quitting.
+Reading through yt-dlp means a **running browser is fine** — it reads the live
+cookies (the SQLite WAL), handles multiple profiles, and decrypts the
+Chrome-family stores (on macOS the first Chrome read pops a Keychain consent
+dialog — allow it). It then confirms with the live API and prints
+`signed in as <name>`. A bare `tubeamp -auth` (auto) is attributed to the browser
+that actually supplied the session, so messages name that concrete browser, never
+"auto", and the source is remembered in `config.yaml` (`auth_browser`) for the
+auto-refresh below.
 
-It then confirms with the live API and prints `signed in as <name>` (or, if the
-cookies still resolve logged out, the anonymous advice — `imported, but YouTube
-still resolved anonymous — are you logged into <browser>? Try signing in there,
-or import from another browser.`, or, when the browser is **running**,
-`<browser> is running — cookies copied from a running browser are often stale.
-Quit <browser> completely (Cmd-Q) and run 'tubeamp -auth <browser>' again.`; if
-the confirmation itself could not run — offline, timeout — it says so instead of
-blaming the cookies, and you can check later with `tubeamp -status`). A bare
-`tubeamp -auth` (auto) is attributed to the browser whose cookie store actually
-supplied the session, so these messages — including the running-browser check —
-name that concrete browser, never "auto". The browser
-the cookies came from is remembered in `config.yaml` (`auth_browser`), and the TUI
-uses it to silently re-import a session that has gone stale (see the rotation note
-below). A running browser does not *block* the read — tubeamp reads through a
-temporary copy of the (locked) cookie database — but, as above, that copy can be
-stale, so quitting first is what makes the import reliable.
+> **If it comes back anonymous**, the cookies imported but YouTube resolved them
+> logged out. Almost always this is **cookie rotation** (see below), not a tubeamp
+> problem: confirm you're signed into YouTube Music in that browser and just run
+> `tubeamp -auth <browser>` again — a fresh read usually lands signed-in. For a
+> session that *stays* fresh, use the incognito trick described under
+> "cookie-rotation" below.
 
-**Multiple profiles.** A browser with several profiles (e.g. Firefox's
-`*.default` beside the active `*.default-release`) imports from the profile that
-actually holds your Google login: tubeamp picks the store whose cookie DB carries
-a SAPISID, preferring the profile marked default in `profiles.ini`, so a stale or
-empty secondary profile never wins.
-
-- **macOS Keychain prompt.** Chrome-family cookies (Chrome/Chromium/Edge/Brave)
-  are encrypted with a key kept in your login Keychain, so the first Chrome
-  import pops a Keychain consent dialog — allow it. Deny it and tubeamp reports a
-  clear error rather than a cryptic decryption failure.
-- **App-Bound Encryption caveat.** Very recent Chrome releases wrap the cookie
-  key in app-bound encryption that refuses external reads. If `-auth chrome`
-  fails to decrypt, use **Firefox** (`-auth firefox`) or **Safari**
-  (`-auth safari`) — neither store is Keychain-encrypted — or fall back to the
-  manual method below.
+yt-dlp must be on your PATH (it is, if playback works); `-auth` errors clearly if
+it is missing.
 
 **Fallback: copy the Cookie header by hand**
 
@@ -206,14 +185,16 @@ also merges whatever is currently in the file, so concurrent users of the same
 auth file (say, a `tubeamp -status` in your tmux status bar next to the running
 TUI) keep each other's rotations instead of overwriting them.
 
-**The cookie-rotation gotcha.** Cookies copied from an *active* browser profile
-go stale within hours: Google continuously rotates the `__Secure-*PSIDTS`
-cookies, and once the browser rotates them your copied snapshot is invalidated —
-tubeamp silently falls back to anonymous (which is exactly what the `○ anonymous`
-indicator is for). If the rotation happens mid-session — sign-in succeeded at
-startup but a later library load comes back logged out — the indicator
-downgrades to `○ anonymous` on the spot instead of contradicting the failing
-loads.
+**The cookie-rotation gotcha.** A YouTube session cookie copied from an *active*
+browser profile goes stale **within minutes**: Google continuously rotates the
+`__Secure-*PSIDTS` cookies, and once your live browser rotates to a new one the
+snapshot tubeamp imported is invalidated — tubeamp falls back to anonymous (which
+is what the `○ anonymous` indicator is for). This — not the request or the
+importer — is behind essentially every "I'm signed in but tubeamp says anonymous"
+case: a cookie that authenticates the moment it's read can be dead a few minutes
+later. If the rotation happens mid-session — sign-in succeeded at startup but a
+later library load comes back logged out — the indicator downgrades to
+`○ anonymous` on the spot instead of contradicting the failing loads.
 
 **Auto-refresh from the browser.** When a session resolves anonymous and you
 imported it with `-auth`, the TUI fires a one-shot re-import from the remembered
