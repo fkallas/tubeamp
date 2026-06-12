@@ -40,8 +40,8 @@ go build ./cmd/tubeamp
 ./tubeamp
 ```
 
-Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `↑/↓` or `j/k` move, `enter` plays,
-`space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `+/-` volume, `/` search,
+Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `j/k` move, `enter` plays,
+`space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `↑/↓` or `+/-` volume, `/` search,
 `o` open the selected album (album rows in search results), `T` theme picker,
 `?` help, `q` quit (playback keeps running in the background).
 

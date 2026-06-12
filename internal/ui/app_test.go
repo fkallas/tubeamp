@@ -106,6 +106,16 @@ func TestCursorMovesWithJK(t *testing.T) {
 	if got := top(); got != start {
 		t.Errorf("after 'k' cursor = %d, want %d", got, start)
 	}
+
+	// Arrows are volume keys now and must not move the list cursor.
+	m = send(m, tea.KeyMsg{Type: tea.KeyDown})
+	if got := top(); got != start {
+		t.Errorf("after down-arrow cursor = %d, want %d (arrows control volume)", got, start)
+	}
+	m = send(m, tea.KeyMsg{Type: tea.KeyUp})
+	if got := top(); got != start {
+		t.Errorf("after up-arrow cursor = %d, want %d (arrows control volume)", got, start)
+	}
 }
 
 func TestHelpOverlayOpensAndCloses(t *testing.T) {

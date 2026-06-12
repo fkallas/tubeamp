@@ -57,8 +57,8 @@ func Default() KeyMap {
 		Focus4:    key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "main")),
 		FocusPrev: key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "previous panel")),
 		FocusNext: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "next panel")),
-		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Up:        key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "up")),
+		Down:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "down")),
 		Top:       key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
 		Bottom:    key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
 
@@ -69,8 +69,8 @@ func Default() KeyMap {
 		Prev:     key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "previous track")),
 		SeekBack: key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "seek -5s")),
 		SeekFwd:  key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "seek +5s")),
-		VolUp:    key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "volume up")),
-		VolDown:  key.NewBinding(key.WithKeys("-"), key.WithHelp("-", "volume down")),
+		VolUp:    key.NewBinding(key.WithKeys("up", "+", "="), key.WithHelp("↑/+", "volume up")),
+		VolDown:  key.NewBinding(key.WithKeys("down", "-"), key.WithHelp("↓/-", "volume down")),
 		Mute:     key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mute")),
 
 		Append:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "append to queue")),

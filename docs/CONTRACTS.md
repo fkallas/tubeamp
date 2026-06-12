@@ -378,7 +378,7 @@ The main view is a stack of frames; a frame is one of three kinds:
 - **search results** (`panels.SearchView`) — a Muted "Songs" header + the track
   table, then a Muted "Albums" header + album rows `▤ <Title> — <Artists> (<Year>)`.
   A single selection cursor runs through both sections (songs first, then albums)
-  so `↑`/`↓` move through them seamlessly.
+  so `j`/`k` move through them seamlessly.
 - **album view** (`panels.AlbumView`) — a header row with a large
   `panels.AlbumCoverCols`×`panels.AlbumCoverRows` (16×8) pixel-art cover on the
   left and the album title (Accent), artists, year + track count (Muted) to its
@@ -389,10 +389,10 @@ The main view is a stack of frames; a frame is one of three kinds:
 Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main
 view; `h`/`l` cycle panel focus backward/forward (1→2→3→4, wrapping);
 `←`/`→` seek -5s/+5s; `space` pause; `n`/`p` next/previous track;
-`+`/`=`/`-` volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
+`↑`/`↓` (also `+`/`=`/`-`) volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
 overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 
-Per panel: `↑`/`↓` or `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
+Per panel: `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
 Library/Playlists `enter` → load (mock) tracks into main view. Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
 `A` insert-next; `o` open album (album rows only). Queue: `enter` jump-to-track,
@@ -402,7 +402,7 @@ Album flows (main view): a search produces two sections — Songs then Albums (s
 below). On an **album row**: `enter` fetches `GetAlbum` then `PlaylistReplace`s the
 queue with the album from track 0 and plays ("Playing <album>" toast); `o` fetches
 `GetAlbum` then pushes a dedicated **album view** onto the main-view stack. In the
-**album view**: `↑`/`↓` move; `enter` = `PlaylistReplace(albumTracks, selected)` +
+**album view**: `j`/`k` move; `enter` = `PlaylistReplace(albumTracks, selected)` +
 play (the whole album, starting at the selected track); `esc` pops back to the
 search results with the cursor preserved. GetAlbum carries a generation guard
 (like the search guard — invalidated by a newer fetch, by `esc`, and by replacing
