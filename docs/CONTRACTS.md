@@ -661,6 +661,23 @@ Cache keyed by videoID, JSON-encoded `Detail`, no expiry. Tests use a fake
 `TrackDetailer` + `t.TempDir` cache (cache-hit fills with zero network calls;
 EnrichMissing fills + caches; concurrency asserted bounded).
 
+## internal/history
+
+tubeamp's OWN local play history (Google removed watch-history from the APIs).
+An ordered `[]model.Track`, most-recent first, deduped by VideoID (a replay moves
+the track to the front), capped at ~200. Persisted as JSON at
+`DataDir()/history.json` with atomic 0600 writes; a missing/corrupt file reads as
+empty (never crashes). Mutex-guarded; safe for concurrent use.
+
+```go
+// package history
+type Store struct{ ... }
+func New(path string) *Store                 // DataDir()/history.json by convention; file created lazily
+func (s *Store) Record(track model.Track) error // move to front, dedup by VideoID, cap, atomic 0600 write;
+                                              // empty-VideoID track ignored; reads degrade corrupt=>empty
+func (s *Store) List() []model.Track          // most-recent first; missing/corrupt => empty slice
+```
+
 ## internal/lyrics
 
 Fetching and parsing of song lyrics — synced (LRC, from LRCLIB) and plain. Pure
