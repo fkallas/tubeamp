@@ -15,6 +15,7 @@ import (
 	"github.com/fkallas/tubeamp/internal/core"
 	"github.com/fkallas/tubeamp/internal/model"
 	"github.com/fkallas/tubeamp/internal/theme"
+	"github.com/fkallas/tubeamp/internal/ytm"
 )
 
 // newTestModel builds a model in degraded mode (no player, no client) at the
@@ -594,6 +595,111 @@ func TestAuthIndicatorInStatusRowWhenLogoHidden(t *testing.T) {
 	}
 	if !strings.Contains(v, "● Felipe Kallas") {
 		t.Errorf("indicator not shown in status row when logo hidden:\n%s", v)
+	}
+}
+
+// TestLibraryPlaylistsMsgFillsPanel injects a real LibraryPlaylists result and
+// asserts it replaces the mock playlists in the panel.
+func TestLibraryPlaylistsMsgFillsPanel(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	// The mock playlists are present before the real fill.
+	if !strings.Contains(ansi.Strip(m.View()), "Focus Deep Work") {
+		t.Fatalf("setup: mock playlist \"Focus Deep Work\" not shown")
+	}
+
+	real := []model.Playlist{
+		{ID: "PLreal1", Title: "My Real Playlist", TrackCount: 12},
+		{ID: "PLreal2", Title: "Another Real One", TrackCount: 5},
+	}
+	m.plGen = 1
+	m = send(m, libPlaylistsMsg{gen: 1, playlists: real})
+
+	if len(m.playlists) != 2 || m.playlists[0].Title != "My Real Playlist" {
+		t.Fatalf("playlists not replaced: %+v", m.playlists)
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "My Real Playlist") {
+		t.Errorf("Playlists panel missing real playlist title in:\n%s", v)
+	}
+	if strings.Contains(v, "Focus Deep Work") {
+		t.Errorf("Playlists panel still shows a mock playlist after the real fill")
+	}
+}
+
+// TestLibraryPlaylistsMsgStaleIgnored asserts a result tagged with an outdated
+// generation is dropped (the panel keeps its current contents).
+func TestLibraryPlaylistsMsgStaleIgnored(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m.plGen = 2
+	before := len(m.playlists)
+	m = send(m, libPlaylistsMsg{gen: 1, playlists: []model.Playlist{{ID: "x", Title: "Stale"}}})
+	if len(m.playlists) != before {
+		t.Errorf("stale libPlaylistsMsg changed the panel: %d -> %d", before, len(m.playlists))
+	}
+}
+
+// TestLibraryPlaylistsMsgNotSignedInKeepsMock asserts an anonymous-session result
+// keeps the mock playlists and toasts the sign-in hint.
+func TestLibraryPlaylistsMsgNotSignedInKeepsMock(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	before := append([]model.Playlist(nil), m.playlists...)
+	m.plGen = 1
+	m = send(m, libPlaylistsMsg{gen: 1, err: ytm.ErrNotSignedIn})
+
+	if len(m.playlists) != len(before) {
+		t.Errorf("ErrNotSignedIn replaced the mock playlists")
+	}
+	if !strings.Contains(m.status, "sign in to load your library") {
+		t.Errorf("status = %q, want sign-in hint", m.status)
+	}
+}
+
+// TestLikedSongsMsgLandsInMainView injects a real Liked Songs result and asserts
+// the tracks become the main view, focused, titled "Liked Songs".
+func TestLikedSongsMsgLandsInMainView(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	_, ts := fakeAlbum() // two tracks: "Test Track One"/"Test Track Two"
+
+	m.libGen = 1
+	m = send(m, libTracksMsg{gen: 1, title: "Liked Songs", tracks: ts})
+
+	if m.FocusedPanel() != "Main" {
+		t.Fatalf("Liked Songs result did not focus the main view; focus = %q", m.FocusedPanel())
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Liked Songs" || len(top.tracks) != len(ts) {
+		t.Fatalf("main frame = {title:%q, tracks:%d}, want {Liked Songs, %d}", top.title, len(top.tracks), len(ts))
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "Test Track One") {
+		t.Errorf("main view missing the loaded liked song")
+	}
+}
+
+// TestLikedSongsMsgNotSignedInTogglesToastAndKeepsMock asserts an anonymous
+// result toasts the sign-in hint and leaves the existing (mock) main view intact.
+func TestLikedSongsMsgNotSignedInTogglesToastAndKeepsMock(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m.libGen = 1
+	m = send(m, libTracksMsg{gen: 1, title: "Liked Songs", err: ytm.ErrNotSignedIn})
+
+	if !strings.Contains(m.status, "sign in to load your library") {
+		t.Errorf("status = %q, want sign-in hint", m.status)
+	}
+	// The startup mock Liked Songs view is untouched.
+	if !strings.Contains(ansi.Strip(m.View()), "Never Gonna Give You Up") {
+		t.Errorf("ErrNotSignedIn replaced the mock main view")
+	}
+}
+
+// TestLibTracksMsgStaleIgnored asserts a track result from a superseded load is
+// dropped rather than stealing the main view.
+func TestLibTracksMsgStaleIgnored(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	_, ts := fakeAlbum()
+	m.libGen = 5
+	m = send(m, libTracksMsg{gen: 4, title: "Liked Songs", tracks: ts})
+	if strings.Contains(ansi.Strip(m.View()), "Test Track One") {
+		t.Errorf("stale libTracksMsg stole the main view")
 	}
 }
 

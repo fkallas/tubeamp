@@ -7,6 +7,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"image"
 	"strings"
 	"time"
@@ -117,6 +118,14 @@ type Model struct {
 	// away (esc / replacing the main view). Album covers need no generation —
 	// they are content-addressed by browseID and cached on arrival.
 	albumGen int
+
+	// libGen guards real library loads that land in the main view (Liked Songs,
+	// a playlist's tracks): a late result is dropped when the user has since
+	// navigated elsewhere (a newer load, esc, or replacing the main view).
+	// plGen separately guards the one-shot Playlists-panel fill so the two never
+	// invalidate each other.
+	libGen int
+	plGen  int
 
 	// Overlays.
 	overlay   overlayKind
@@ -323,6 +332,25 @@ type accountInfoMsg struct {
 	err      error
 }
 
+// libPlaylistsMsg carries the one-shot LibraryPlaylists result that fills the
+// Playlists panel for a signed-in session. gen ties it to the plGen that issued
+// it; err is ytm.ErrNotSignedIn for an anonymous session (mock data is kept).
+type libPlaylistsMsg struct {
+	gen       int
+	playlists []model.Playlist
+	err       error
+}
+
+// libTracksMsg carries a real library track load (Liked Songs or a playlist's
+// tracks) destined for the main view, titled by title. gen ties it to the libGen
+// that issued it; err is ytm.ErrNotSignedIn for an anonymous session.
+type libTracksMsg struct {
+	gen    int
+	title  string
+	tracks []model.Track
+	err    error
+}
+
 // listenPlayer receives one player event per command and is re-issued after
 // each event so the stream keeps flowing without blocking Update.
 func listenPlayer(p *player.Player) tea.Cmd {
@@ -430,6 +458,39 @@ func accountInfoCmd(c *ytm.Client) tea.Cmd {
 		defer cancel()
 		name, signedIn, err := c.AccountInfo(ctx)
 		return accountInfoMsg{name: name, signedIn: signedIn, err: err}
+	}
+}
+
+// libraryPlaylistsCmd fetches the signed-in user's playlists for the Playlists
+// panel. plGen tags the result so a stale one is dropped.
+func libraryPlaylistsCmd(c *ytm.Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		pls, err := c.LibraryPlaylists(ctx)
+		return libPlaylistsMsg{gen: gen, playlists: pls, err: err}
+	}
+}
+
+// likedSongsCmd fetches the Liked Songs auto-playlist into the main view; title
+// is echoed back so the result handler can title the frame.
+func likedSongsCmd(c *ytm.Client, title string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		ts, err := c.LikedSongs(ctx)
+		return libTracksMsg{gen: gen, title: title, tracks: ts, err: err}
+	}
+}
+
+// playlistTracksCmd fetches a playlist's tracks into the main view, titled by
+// the playlist name.
+func playlistTracksCmd(c *ytm.Client, id, title string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		ts, err := c.PlaylistTracks(ctx, id)
+		return libTracksMsg{gen: gen, title: title, tracks: ts, err: err}
 	}
 }
 
@@ -638,6 +699,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authChecked = true
 		m.authSignedIn = msg.signedIn
 		m.authName = msg.name
+		// Now that we know the session is live, fill the Playlists panel with the
+		// user's real playlists. An anonymous session keeps the mock data.
+		if msg.signedIn && m.c != nil {
+			m.plGen++
+			return m, libraryPlaylistsCmd(m.c, m.plGen)
+		}
+		return m, nil
+
+	case libPlaylistsMsg:
+		if msg.gen != m.plGen {
+			return m, nil
+		}
+		if msg.err != nil {
+			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
+				m.setError("sign in to load your library — see README")
+			} else {
+				m.setError("could not load playlists: " + msg.err.Error())
+			}
+			return m, nil // keep the mock playlists
+		}
+		m.playlists = msg.playlists
+		if m.plCursor >= len(m.playlists) {
+			m.plCursor = 0
+		}
+		return m, nil
+
+	case libTracksMsg:
+		if msg.gen != m.libGen {
+			return m, nil
+		}
+		if msg.err != nil {
+			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
+				m.setError("sign in to load your library — see README")
+			} else {
+				m.setError("could not load " + msg.title + ": " + msg.err.Error())
+			}
+			return m, nil // keep the current (mock) view
+		}
+		m.status = ""
+		m.setMain(msg.title, msg.tracks)
+		m.setFocus(focusMain)
 		return m, nil
 	}
 
@@ -724,8 +826,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			// Navigating back also invalidates any in-flight GetAlbum, so a
 			// late album page can neither hijack the queue (enter on an album
-			// row) nor push its view over the wrong context ('o').
+			// row) nor push its view over the wrong context ('o'), and any
+			// in-flight library load so it cannot replace the restored view.
 			m.albumGen++
+			m.libGen++
 		}
 
 	case key.Matches(msg, k.Up):
@@ -948,12 +1052,35 @@ func (m *Model) handleEnter() tea.Cmd {
 	case focusLibrary:
 		if m.libCursor >= 0 && m.libCursor < len(m.libItems) {
 			name := m.libItems[m.libCursor]
+			// Liked Songs loads live for a signed-in session; everything else
+			// (Albums/Artists/Songs/History) stays mock for now.
+			if name == "Liked Songs" && m.canLoadLibrary() {
+				m.libGen++
+				m.setStatus("loading Liked Songs…")
+				m.setFocus(focusMain)
+				return likedSongsCmd(m.c, name, m.libGen)
+			}
+			if name == "Liked Songs" && m.c != nil {
+				// A client is present but the session is anonymous.
+				m.setMain(name, mockLibraryTracks(name))
+				m.setFocus(focusMain)
+				m.setError("sign in to load your library — see README")
+				return nil
+			}
 			m.setMain(name, mockLibraryTracks(name))
 			m.setFocus(focusMain)
 		}
 	case focusPlaylists:
 		if m.plCursor >= 0 && m.plCursor < len(m.playlists) {
 			pl := m.playlists[m.plCursor]
+			// A signed-in session loads the real playlist; otherwise the panel
+			// still holds mock playlists, played from the mock track sets.
+			if m.canLoadLibrary() {
+				m.libGen++
+				m.setStatus("loading " + pl.Title + "…")
+				m.setFocus(focusMain)
+				return playlistTracksCmd(m.c, pl.ID, pl.Title, m.libGen)
+			}
 			m.setMain(pl.Title, mockPlaylistTracks(pl.ID))
 			m.setFocus(focusMain)
 		}
@@ -1219,12 +1346,13 @@ func (m *Model) removeFromQueue() tea.Cmd {
 }
 
 // setMain replaces the main-view stack with a single content frame. It also
-// invalidates any in-flight search and album fetch so a late result cannot
-// replace or cover the view the user just navigated to.
+// invalidates any in-flight search, album, and library fetch so a late result
+// cannot replace or cover the view the user just navigated to.
 func (m *Model) setMain(title string, tracks []model.Track) {
 	m.stack = []mainContent{{title: title, tracks: tracks}}
 	m.searchGen++
 	m.albumGen++
+	m.libGen++
 }
 
 // pushMain pushes a new track-list content frame onto the main-view stack.
@@ -1328,6 +1456,13 @@ func (m Model) albumCoverBlock(a model.Album) string {
 
 func (m *Model) setStatus(s string) { m.status, m.statusErr = s, false }
 func (m *Model) setError(s string)  { m.status, m.statusErr = s, true }
+
+// canLoadLibrary reports whether real library/playlist browses should run: a
+// client is present and the one-shot sign-in check confirmed a live session.
+// Anonymous (or unresolved) sessions fall back to mock data instead.
+func (m Model) canLoadLibrary() bool {
+	return m.c != nil && m.authSignedIn
+}
 
 // authIndicator returns the styled sign-in status shown at the right end of the
 // logo row (or the status line when the logo is hidden), or "" before the

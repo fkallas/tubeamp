@@ -313,6 +313,21 @@ func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error
 func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter
 func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error)
                                                   // browse endpoint {browseId: ...}; sets Album.BrowseID = browseID
+
+// Library / playlists (browse, same WEB_REMIX context). REQUIRE a live signed-in
+// session: an anonymous (or stale-cookie) session makes YouTube return the
+// logged-out page, which these surface as ErrNotSignedIn — a typed error, NOT an
+// empty success, so the UI can tell "empty library" from "not signed in".
+var ErrNotSignedIn = parse.ErrNotSignedIn // aliased so errors.Is works on ytm.<method> results
+
+func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
+                                                  // browseId FEmusic_liked_playlists; skips the synthetic
+                                                  // "New playlist" tile; Playlist.ID has any "VL" prefix stripped
+func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error)
+                                                  // Liked Songs auto-playlist (browseId "VLLM"); first page (~100) only
+func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model.Track, error)
+                                                  // browseId "VL"+playlistID (accepts an already-prefixed id);
+                                                  // first page (~100) only
 func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, err error)
                                                   // account/account_menu; signedIn = activeAccountHeaderRenderer
                                                   // present, name from its accountName runs. Logged-out menu =>
@@ -323,6 +338,12 @@ func SearchTracks(raw []byte) ([]model.Track, error)                  // songs s
 func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums search shelf + top-result card
 func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
 func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account/account_menu menu (both shapes)
+
+var ErrNotSignedIn = errors.New("ytm: not signed in") // logged-out page (expected renderer absent)
+func LibraryPlaylists(raw []byte) ([]model.Playlist, error) // FEmusic_liked_playlists gridRenderer;
+                                                  // skips "New playlist" tile; ErrNotSignedIn when no gridRenderer
+func PlaylistTracks(raw []byte) ([]model.Track, error)     // playlist/Liked-Songs musicPlaylistShelfRenderer;
+                                                  // ErrNotSignedIn when absent; present-but-empty shelf => empty slice
 // All defensive: skip malformed items, never panic. AlbumPage handles BOTH
 // header shapes (musicDetailHeaderRenderer and musicResponsiveHeaderRenderer);
 // per-track artists fall back to album artists, Track.Album = album title,
@@ -336,6 +357,9 @@ comment. Parser fixtures in `parse/testdata/` (`search_albums.json`,
 handcrafted to exercise the older `musicDetailHeaderRenderer` shape.
 `account_signed_in.json` / `account_logged_out.json` are handcrafted to exercise
 both `AccountInfo` shapes (with and without `activeAccountHeaderRenderer`).
+`library_playlists.json` / `playlist_tracks.json` are handcrafted (grid +
+playlist-shelf), each with one malformed item skipped; the not-signed-in path is
+covered by feeding a renderer-less object and asserting `ErrNotSignedIn`.
 
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 
@@ -420,7 +444,8 @@ view; `h`/`l` cycle panel focus backward/forward (1→2→3→4, wrapping);
 overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 
 Per panel: `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
-Library/Playlists `enter` → load (mock) tracks into main view. Main view
+Library/Playlists `enter` → load tracks into the main view (see "Library &
+playlists" below for the real-vs-mock split). Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
 `A` insert-next; `o` open album (album rows only). Queue: `enter` jump-to-track,
 `d` remove, `J/K` move item, `c` clear.
@@ -482,8 +507,27 @@ func listenPlayer(p *player.Player) tea.Cmd {
   playback disabled").
 - Use `lipgloss.Width`/`Height` for layout math on styled strings, never `len()`.
 
-Mock data lives in `internal/ui/mock.go` (provided in task prompt) until the
-real library lands.
+### Library & playlists (real vs mock)
+
+For a **signed-in** session (client non-nil and the one-shot `AccountInfo` check
+resolved `signedIn`), real data replaces the mock:
+
+- On that sign-in result the model fires `LibraryPlaylists` (guarded by `plGen`)
+  and replaces the Playlists panel with the user's real playlists.
+- Library "Liked Songs" `enter` → `LikedSongs` Cmd into the main view; a playlist
+  `enter` → `PlaylistTracks` into the main view titled by the playlist name. Both
+  show a "loading …" status while in flight and are guarded by `libGen`
+  (a stale result — the user navigated away, a newer load, esc, or replacing the
+  main view — is dropped, mirroring the search/album generation pattern).
+
+For an **anonymous** session (no client, or the check resolved not-signed-in) the
+mock data is kept; "Liked Songs"/playlist `enter` toast "sign in to load your
+library — see README". The browse methods returning `ytm.ErrNotSignedIn` (matched
+with `errors.Is`) likewise keep the mock data and toast the same hint.
+
+The other Library items (Albums/Artists/Songs/History) remain mock for now.
+Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`); the real
+browses never run from tests. Mock data lives in `internal/ui/mock.go`.
 
 ## cmd/tubeamp
 

@@ -19,9 +19,13 @@ can wire keybindings and status bars to it.
 
 Early scaffold. The TUI shell, theming, persistent/detached mpv playback (with a
 playlist-backed queue, CLI control, and gapless prefetch), and the pixel-art
-renderer work end to end with mock library data; the YT Music API client wires
-unauthenticated song/album search and album browsing into the search view, with
-library/playlists/radio not yet.
+renderer work end to end. The YT Music API client wires unauthenticated
+song/album search and album browsing into the search view. For a **signed-in**
+session it also loads your real library: the Playlists panel fills with your
+playlists on startup, Library → "Liked Songs" loads your Liked Songs, and opening
+a playlist loads its tracks (first page, ~100 tracks each; radio not yet). An
+**anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
+remaining Library sections (Albums/Artists/Songs/History) are still mock.
 
 Note: anonymous InnerTube **album** search only surfaces self-distributed
 releases — YouTube withholds the major-label catalog from logged-out clients
