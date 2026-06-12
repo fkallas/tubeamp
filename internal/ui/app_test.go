@@ -329,8 +329,22 @@ func TestLogoVisibleAtLargeTerminal(t *testing.T) {
 	}
 }
 
+// TestLogoWordmarkAndIndicator asserts the 3-row cyberpunk logo renders the
+// "tubeamp" wordmark, the ▶ play glyph, the right-aligned version, AND that the
+// sign-in indicator still rides the logo's rule row alongside the taller logo.
+func TestLogoWordmarkAndIndicator(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"tubeamp", "▶", appVersion, "● Felipe Kallas"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("logo view missing %q in:\n%s", want, v)
+		}
+	}
+}
+
 // TestLogoHiddenAtSmallTerminal asserts that the logo is suppressed when the
-// terminal height is below logoMinTermHeight (24) — the wordmark must not appear.
+// terminal height is below logoMinTermHeight — the wordmark must not appear.
 func TestLogoHiddenAtSmallTerminal(t *testing.T) {
 	m := newTestModel(t, 120, 22)
 	v := ansi.Strip(m.View())
@@ -497,16 +511,16 @@ func TestLateAlbumCoverIsCached(t *testing.T) {
 }
 
 // TestLogoVisibilityBoundary pins the logo's height boundary: visible at
-// exactly logoMinTermHeight (24), hidden one row below (23) — and in both
-// modes the rendered view still totals exactly the terminal height with
-// full-width rows (the 2 logo rows are reclaimed by the panel area).
+// exactly logoMinTermHeight, hidden one row below — and in both modes the
+// rendered view still totals exactly the terminal height with full-width rows
+// (the logoHeight logo rows are reclaimed by the panel area when hidden).
 func TestLogoVisibilityBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		h       int
 		visible bool
 	}{
-		{logoMinTermHeight, true},      // 24: first height that shows the logo
-		{logoMinTermHeight - 1, false}, // 23: last height that hides it
+		{logoMinTermHeight, true},      // first height that shows the logo
+		{logoMinTermHeight - 1, false}, // last height that hides it
 	} {
 		m := newTestModel(t, 120, tc.h)
 		raw := m.View()
@@ -521,6 +535,29 @@ func TestLogoVisibilityBoundary(t *testing.T) {
 			if got := lipgloss.Width(ln); got != 120 {
 				t.Errorf("h=%d: line %d width = %d, want 120", tc.h, i, got)
 				break
+			}
+		}
+	}
+}
+
+// TestLayoutInvariantAcrossHeights sweeps heights spanning the (taller, 3-row)
+// logo boundary and asserts the rendered view always totals exactly the terminal
+// height with full-width rows — i.e. the 3-row logo never makes the panel area
+// overflow or clip at the minimum sizes.
+func TestLayoutInvariantAcrossHeights(t *testing.T) {
+	for _, w := range []int{minWidth, 120} {
+		for h := minHeight; h <= logoMinTermHeight+3; h++ {
+			m := newTestModel(t, w, h)
+			lines := strings.Split(m.View(), "\n")
+			if len(lines) != h {
+				t.Errorf("%dx%d: view has %d rows, want %d", w, h, len(lines), h)
+				continue
+			}
+			for i, ln := range lines {
+				if got := lipgloss.Width(ln); got != w {
+					t.Errorf("%dx%d: line %d width = %d, want %d", w, h, i, got, w)
+					break
+				}
 			}
 		}
 	}

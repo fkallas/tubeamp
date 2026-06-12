@@ -60,6 +60,7 @@ var hardcodedMocha = &Theme{
 var builtinNames = []string{
 	"catppuccin-latte",
 	"catppuccin-mocha",
+	"cyberpunk",
 	"dracula",
 	"gruvbox-dark",
 	"nord",

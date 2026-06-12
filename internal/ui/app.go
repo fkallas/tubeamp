@@ -1743,9 +1743,9 @@ func (m Model) View() string {
 		return m.tooSmall()
 	}
 
-	// Logo header: 2 rows when terminal is tall enough, otherwise hidden. The
-	// sign-in indicator rides the right end of the logo's rule row; when the logo
-	// is hidden it falls through to the status line instead (see bottomLine).
+	// Logo header: logoHeight (3) rows when terminal is tall enough, otherwise
+	// hidden. The sign-in indicator rides the right end of the logo's rule row;
+	// when the logo is hidden it falls through to the status line (see bottomLine).
 	ind := m.authIndicator()
 	logo := renderLogo(m.th, m.width, m.height, ind)
 	logoOff := 0

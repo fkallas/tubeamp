@@ -9,10 +9,11 @@ import (
 	"github.com/fkallas/tubeamp/internal/theme"
 )
 
-// allBuiltins lists the six expected builtin theme names.
+// allBuiltins lists the expected builtin theme names, in sorted order.
 var allBuiltins = []string{
 	"catppuccin-latte",
 	"catppuccin-mocha",
+	"cyberpunk",
 	"dracula",
 	"gruvbox-dark",
 	"nord",
@@ -58,6 +59,41 @@ func TestBuiltinsLoad(t *testing.T) {
 				t.Errorf("Palette() returned %d colors, want 9", len(palette))
 			}
 		})
+	}
+}
+
+// TestCyberpunkTheme verifies the neon cyberpunk builtin loads with all nine
+// tokens as valid #rrggbb hex strings and appears in List() / Builtins().
+func TestCyberpunkTheme(t *testing.T) {
+	th, err := theme.Load("cyberpunk", "")
+	if err != nil {
+		t.Fatalf("Load(\"cyberpunk\") error: %v", err)
+	}
+	if th.Name != "cyberpunk" {
+		t.Errorf("Name = %q, want cyberpunk", th.Name)
+	}
+	tokens := []string{
+		th.Colors.BorderInactive, th.Colors.BorderActive,
+		th.Colors.TextPrimary, th.Colors.TextMuted,
+		th.Colors.Accent, th.Colors.Playing, th.Colors.Error,
+		th.Colors.SelectionBG, th.Colors.SelectionFG,
+	}
+	if len(tokens) != 9 {
+		t.Fatalf("expected 9 tokens, got %d", len(tokens))
+	}
+	for i, tok := range tokens {
+		if !isValidHex(tok) {
+			t.Errorf("token %d = %q is not a valid #rrggbb color", i, tok)
+		}
+	}
+	if got := len(th.Palette()); got != 9 {
+		t.Errorf("Palette() = %d colors, want 9", got)
+	}
+	if !contains(theme.List(""), "cyberpunk") {
+		t.Error("cyberpunk missing from List(\"\")")
+	}
+	if !contains(theme.Builtins(), "cyberpunk") {
+		t.Error("cyberpunk missing from Builtins()")
 	}
 }
 

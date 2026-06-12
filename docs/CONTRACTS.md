@@ -162,7 +162,8 @@ func (t *Theme) Palette() []color.Color                 // all theme colors, for
 
 Builtins (embed YAML via `go:embed builtin/*.yaml`, canonical palettes):
 `catppuccin-mocha`, `catppuccin-latte`, `gruvbox-dark`, `nord`, `dracula`,
-`tokyo-night`. User themes are the same YAML shape.
+`tokyo-night`, `cyberpunk` (neon: magenta/cyan on deep purple). User themes are
+the same YAML shape.
 
 ## internal/art
 
@@ -481,8 +482,9 @@ func CompositeCenter(overlay, background string) string
 ### Layout
 
 ```
-╭◉╮ tubeamp                                          v0.1.0   ← logo header (2 rows)
-╰─╯ ─────────────────────────
+▛▀▜                                                  v0.1.0   ← logo header (3 rows)
+▌▶▐ tubeamp ▓▒░
+▙▄▟━━━━━━━━━━━━━━━━━━━━━━━━━━━              ● account
 ╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
 ╰────────────╯│                                 │
@@ -497,10 +499,13 @@ func CompositeCenter(overlay, background string) string
  <context-sensitive key hints, single line>
 ```
 
-Logo header: 2 rows, at most ~28 cols for the glyph+wordmark. The glyph
-("╭◉╮") is rendered in AccentStyle, the wordmark "tubeamp" in Primary, and
-"v0.1.0" right-aligned in Muted. When terminal height < 24 the logo is hidden
-entirely and the panel area reclaims those 2 rows.
+Logo header: 3 rows (a cyberpunk wordmark — `logoHeight`), at most ~28 cols for
+the emblem+wordmark. The emblem ("▛▀▜"/"▌▐"/"▙▄▟") + glitch tail ("▓▒░") render
+in AccentStyle, the ▶ play glyph in PlayingStyle (so it glows), the wordmark
+"tubeamp" in Primary, the underline rule + "v0.1.0" (right-aligned, row 1) in
+Muted. When terminal height < `logoMinTermHeight` (25) the logo is hidden
+entirely and the panel area reclaims those rows. Colours come strictly from
+theme tokens — no hardcoded hex.
 
 Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
 `AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently

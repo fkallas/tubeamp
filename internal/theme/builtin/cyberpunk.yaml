@@ -1,0 +1,11 @@
+name: cyberpunk
+colors:
+  border_inactive: "#3b2d5e"
+  border_active: "#ff2e97"
+  text_primary: "#f0f6ff"
+  text_muted: "#7b6ca3"
+  accent: "#ff2e97"
+  playing: "#05ffa1"
+  error: "#ff3864"
+  selection_bg: "#341a52"
+  selection_fg: "#00e5ff"
