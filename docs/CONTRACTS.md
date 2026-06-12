@@ -435,12 +435,15 @@ entirely and the panel area reclaims those 2 rows.
 
 Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
 `AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently
-at the right end of the logo's rule row, or right-aligned on the bottom status
+at the right end of the logo's rule row (ANSI-aware-truncated with an ellipsis
+when a long account name would not fit), or right-aligned on the bottom status
 line when the logo is hidden. Signed in => "● <name>" in PlayingStyle; an auth
 file that resolves anonymous (a stale cookie) => "○ anonymous — cookie stale?
 see README" in Muted; no auth file => "○ not signed in" in Muted. A failed check
-(network down) leaves the indicator blank (no retry). Tests inject the result via
-`accountInfoMsg`, never the network.
+(network down) leaves the indicator blank (no retry). A library browse that
+later returns `ErrNotSignedIn` downgrades the resolved state to anonymous (the
+cookie rotated mid-session), flipping the indicator to the stale-cookie hint.
+Tests inject the result via `accountInfoMsg`, never the network.
 
 Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 (items + border), Playlists/Queue split the rest. Player bar 4 content lines.
@@ -462,10 +465,14 @@ The main view is a stack of frames; a frame is one of three kinds:
   move through them seamlessly. The Albums section is **merged** from two sources:
   albums *derived from the song hits* (`SearchWithAlbums`, full catalog) come FIRST,
   then the dedicated albums-vertical results (`SearchAlbums`, degraded for anonymous
-  sessions), deduped by BrowseID. The two responses arrive separately and the
-  merge is recomputed as each lands; both `enter` (play album) and `o` (album view)
-  drive `GetAlbum` off the row's BrowseID, so a derived album's empty Year/ThumbURL
-  fill in when it is opened.
+  sessions), deduped by BrowseID — an album present in both sources keeps its
+  derived-first position and title but takes the vertical's richer
+  Artists/Year/ThumbURL. The two responses arrive separately and the merge is
+  recomputed as each lands; when the songs land after the albums vertical, a
+  highlighted album row keeps its selection (the cursor follows the album to its
+  new combined index). Both `enter` (play album) and `o` (album view) drive
+  `GetAlbum` off the row's BrowseID, so a derived album's missing metadata fills
+  in when it is opened.
 - **album view** (`panels.AlbumView`) — a header row with a large
   `panels.AlbumCoverCols`×`panels.AlbumCoverRows` (16×8) pixel-art cover on the
   left and the album title (Accent), artists, year + track count (Muted) to its
@@ -553,15 +560,23 @@ resolved `signedIn`), real data replaces the mock:
 - On that sign-in result the model fires `LibraryPlaylists` (guarded by `plGen`)
   and replaces the Playlists panel with the user's real playlists.
 - Library "Liked Songs" `enter` → `LikedSongs` Cmd into the main view; a playlist
-  `enter` → `PlaylistTracks` into the main view titled by the playlist name. Both
-  show a "loading …" status while in flight and are guarded by `libGen`
-  (a stale result — the user navigated away, a newer load, esc, or replacing the
-  main view — is dropped, mirroring the search/album generation pattern).
+  `enter` → `PlaylistTracks` into the main view titled by the playlist name —
+  but only once the panel actually holds real playlists: while the
+  `LibraryPlaylists` fill is still in flight (or failed) the rows are mock data
+  and play their mock tracks locally; a mock ID never reaches a real browse.
+  Both real loads show a "loading …" status while in flight and are guarded by
+  `libGen` (a stale result — the user navigated away, a newer load, esc,
+  issuing a new search, or replacing the main view — is dropped, mirroring the
+  search/album generation pattern).
 
-For an **anonymous** session (no client, or the check resolved not-signed-in) the
-mock data is kept; "Liked Songs"/playlist `enter` toast "sign in to load your
-library — see README". The browse methods returning `ytm.ErrNotSignedIn` (matched
-with `errors.Is`) likewise keep the mock data and toast the same hint.
+For an **anonymous** session the mock data is kept. With a client present (the
+check resolved not-signed-in), "Liked Songs"/playlist `enter` loads the mock
+tracks and toasts "sign in to load your library — see README"; with no client at
+all the mock loads silently (no hint — there is nothing to sign in to). The
+browse methods returning `ytm.ErrNotSignedIn` (matched with `errors.Is`) keep
+the mock data, toast the same hint, and downgrade the resolved sign-in state to
+anonymous (the cookie rotated mid-session), so the indicator and the library
+behavior stay consistent.
 
 The other Library items (Albums/Artists/Songs/History) remain mock for now.
 Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`); the real

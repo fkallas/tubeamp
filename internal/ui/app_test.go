@@ -798,3 +798,219 @@ func TestGetAlbumFromDerivedAlbumWithEmptyYear(t *testing.T) {
 		t.Errorf("album view missing title/year after GetAlbum:\n%s", av)
 	}
 }
+
+// TestPlaylistEnterWhilePanelStillMockPlaysMock guards the sign-in/fill race:
+// a signed-in session whose Playlists panel still holds mock data (the
+// LibraryPlaylists fill is in flight or failed) must play the mock tracks
+// locally — a mock ID like "focus" must never reach a real PlaylistTracks
+// browse (browseId "VLfocus").
+func TestPlaylistEnterWhilePanelStillMockPlaysMock(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	if !m.canLoadLibrary() {
+		t.Fatal("setup: expected canLoadLibrary after signed-in result")
+	}
+
+	m = send(m, runes("2")) // focus Playlists (still mock: fill not landed)
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd != nil {
+		t.Fatal("enter on a mock playlist row dispatched a command (would browse a fake ID)")
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Focus Deep Work" || len(top.tracks) == 0 {
+		t.Errorf("mock playlist did not open its mock tracks: title=%q tracks=%d", top.title, len(top.tracks))
+	}
+}
+
+// TestPlaylistEnterRealAfterPanelFilled asserts the real browse path engages
+// only once the panel holds real playlists.
+func TestPlaylistEnterRealAfterPanelFilled(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+	m.plGen = 1
+	m = send(m, libPlaylistsMsg{gen: 1, playlists: []model.Playlist{{ID: "PLreal1", Title: "My Real Playlist"}}})
+	if !m.playlistsReal {
+		t.Fatal("setup: playlistsReal not set after successful fill")
+	}
+
+	m = send(m, runes("2"))
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("enter on a real playlist row dispatched no PlaylistTracks command")
+	}
+	if !strings.Contains(m.status, "loading") {
+		t.Errorf("status = %q, want a loading notice", m.status)
+	}
+}
+
+// TestPlaylistEnterAnonymousToastsSignInHint pins the documented anonymous
+// behavior: with a client present but the session resolved anonymous, opening a
+// (mock) playlist loads the mock tracks AND toasts the sign-in hint.
+func TestPlaylistEnterAnonymousToastsSignInHint(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(m, accountInfoMsg{signedIn: false})
+
+	m = send(m, runes("2"))
+	m = send(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(m.status, "sign in to load your library") {
+		t.Errorf("status = %q, want the sign-in hint", m.status)
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Focus Deep Work" || len(top.tracks) == 0 {
+		t.Errorf("anonymous playlist enter did not open mock tracks: title=%q tracks=%d", top.title, len(top.tracks))
+	}
+}
+
+// TestSearchInvalidatesPendingLibraryLoad covers the stack-push hole: a Liked
+// Songs load in flight when the user issues a new search must be dropped — its
+// late result may not setMain over (and so destroy) the search-results frame.
+func TestSearchInvalidatesPendingLibraryLoad(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+
+	// Enter on "Liked Songs" issues the real load (the Cmd is never executed).
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	pendingGen := m.libGen
+
+	// The user issues a new search before the load lands…
+	m = send(m, runes("/"))
+	m = send(m, runes("rush"))
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.libGen == pendingGen {
+		t.Fatal("issuing a search did not invalidate the in-flight library load")
+	}
+
+	// …its results land and the user is browsing them…
+	_, ts := fakeAlbum()
+	m = send(m, searchResultMsg{gen: m.searchGen, query: "rush", tracks: ts})
+	if top := m.stack[len(m.stack)-1]; top.kind != mainSearch {
+		t.Fatalf("setup: top frame kind = %v, want mainSearch", top.kind)
+	}
+	depth := len(m.stack)
+
+	// …when the stale library result finally arrives: it must be dropped.
+	m = send(m, libTracksMsg{gen: pendingGen, title: "Liked Songs", tracks: mockTracks})
+	if top := m.stack[len(m.stack)-1]; top.kind != mainSearch || len(m.stack) != depth {
+		t.Errorf("late library load stole the view: kind=%v depth=%d (want mainSearch, %d)", top.kind, len(m.stack), depth)
+	}
+}
+
+// TestNotSignedInDowngradesAuth asserts a library browse coming back logged-out
+// flips the resolved sign-in state to anonymous: the indicator switches to the
+// stale-cookie hint and real library loads stop being issued, instead of an
+// "● <name>" header forever contradicting "sign in to load your library" toasts.
+func TestNotSignedInDowngradesAuth(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m.hasAuth = true // an auth file was loaded
+	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
+
+	m.libGen = 1
+	m = send(m, libTracksMsg{gen: 1, title: "Liked Songs", err: ytm.ErrNotSignedIn})
+
+	if m.authSignedIn || m.authName != "" {
+		t.Errorf("auth not downgraded: signedIn=%v name=%q", m.authSignedIn, m.authName)
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "anonymous") || !strings.Contains(v, "cookie stale") {
+		t.Errorf("indicator did not switch to the stale-cookie hint:\n%s", v)
+	}
+	if strings.Contains(v, "● Felipe Kallas") {
+		t.Errorf("signed-in indicator still shown after downgrade")
+	}
+}
+
+// TestMergeEnrichesDerivedAlbumFromVertical pins the per-BrowseID metadata
+// merge: an album present in both sources keeps its derived-first position and
+// title but takes the vertical's richer Year, artists and cover — the derived
+// ref's stand-ins (song artists incl. features, song thumb, empty Year) must
+// not downgrade the rendered row.
+func TestMergeEnrichesDerivedAlbumFromVertical(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	ts := []model.Track{{VideoID: "v1", Title: "S1", Artists: []string{"Album Artist", "Feature"}, Album: "Moving Pictures", Duration: time.Minute}}
+	derived := model.Album{BrowseID: "MPRE_mp", Title: "Moving Pictures", Artists: []string{"Album Artist", "Feature"}, ThumbURL: "https://song-thumb"}
+	vertical := model.Album{BrowseID: "MPRE_mp", Title: "Moving Pictures (vertical)", Artists: []string{"Album Artist"}, Year: "1981", ThumbURL: "https://album-cover"}
+
+	m.searchGen = 3
+	m = send(m, searchResultMsg{gen: 3, query: "q", tracks: ts, derivedAlbums: []model.Album{derived}})
+	m = send(m, albumSearchMsg{gen: 3, query: "q", albums: []model.Album{vertical}})
+
+	top := m.stack[len(m.stack)-1]
+	if len(top.albums) != 1 {
+		t.Fatalf("merged albums = %d, want 1", len(top.albums))
+	}
+	got := top.albums[0]
+	if got.Title != "Moving Pictures" {
+		t.Errorf("Title = %q, want the derived ref's title kept", got.Title)
+	}
+	if got.Year != "1981" {
+		t.Errorf("Year = %q, want %q from the vertical record", got.Year, "1981")
+	}
+	if len(got.Artists) != 1 || got.Artists[0] != "Album Artist" {
+		t.Errorf("Artists = %v, want the vertical's true album artists", got.Artists)
+	}
+	if got.ThumbURL != "https://album-cover" {
+		t.Errorf("ThumbURL = %q, want the vertical's album cover", got.ThumbURL)
+	}
+}
+
+// TestLateSongsPreserveAlbumSelection covers out-of-order arrival: the albums
+// vertical lands first, the user highlights an album, then the songs result
+// prepends the Songs section and reorders the Albums section (derived-first).
+// The highlighted row must keep its identity — the same album, at its new
+// combined index — rather than silently becoming an unrelated song.
+func TestLateSongsPreserveAlbumSelection(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a1 := model.Album{BrowseID: "MPRE_a1", Title: "First Vertical"}
+	a2 := model.Album{BrowseID: "MPRE_a2", Title: "Second Vertical"}
+	d := model.Album{BrowseID: "MPRE_d", Title: "Derived"}
+	ts := []model.Track{
+		{VideoID: "v1", Title: "Song One", Duration: time.Minute},
+		{VideoID: "v2", Title: "Song Two", Duration: time.Minute},
+	}
+
+	m.searchGen = 4
+	m = send(m, albumSearchMsg{gen: 4, query: "q", albums: []model.Album{a1, a2}})
+	m.stack[len(m.stack)-1].cursor = 1 // user highlights a2 (no songs yet)
+
+	m = send(m, searchResultMsg{gen: 4, query: "q", tracks: ts, derivedAlbums: []model.Album{d}})
+
+	top := m.stack[len(m.stack)-1]
+	// Merged albums: derived first, then the vertical pair => a2 at index 2.
+	wantCursor := len(ts) + 2
+	if top.cursor != wantCursor {
+		t.Fatalf("cursor = %d, want %d (selection follows album %q)", top.cursor, wantCursor, a2.Title)
+	}
+	if got := top.albums[top.cursor-len(top.tracks)].BrowseID; got != a2.BrowseID {
+		t.Errorf("selected album = %q, want %q", got, a2.BrowseID)
+	}
+}
+
+// TestLogoIndicatorTruncatedAtNarrowWidth asserts a long account name clips
+// with an ellipsis on the logo rule row instead of the indicator vanishing
+// entirely (its only home when the logo is visible).
+func TestLogoIndicatorTruncatedAtNarrowWidth(t *testing.T) {
+	m := newTestModel(t, 70, 40) // min width, logo visible
+	m = send(m, accountInfoMsg{name: strings.Repeat("N", 60), signedIn: true})
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "● N") {
+		t.Errorf("long-name indicator dropped at narrow width:\n%s", v)
+	}
+	if !strings.Contains(v, "…") {
+		t.Errorf("long-name indicator not truncated with an ellipsis:\n%s", v)
+	}
+	// Every row must still be exactly the terminal width.
+	for i, ln := range strings.Split(m.View(), "\n") {
+		if got := lipgloss.Width(ln); got != 70 {
+			t.Errorf("line %d width = %d, want 70", i, got)
+			break
+		}
+	}
+}

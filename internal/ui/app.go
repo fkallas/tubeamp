@@ -111,6 +111,12 @@ type Model struct {
 	plCursor    int
 	queueCursor int
 
+	// playlistsReal flips when a LibraryPlaylists result has replaced the mock
+	// playlists. Until then (sign-in check pending, fill in flight, or the fill
+	// failed) the panel rows are mock data whose IDs must never reach a real
+	// PlaylistTracks browse.
+	playlistsReal bool
+
 	// Main-view stack (top = stack[len-1]).
 	stack []mainContent
 
@@ -627,9 +633,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = ""
 		fr := m.ensureSearchFrame(msg.query)
+		// The songs section is about to be prepended and the albums reordered
+		// derived-first; when the albums vertical landed first and a row is
+		// highlighted, remember which album it is so the selection keeps its
+		// identity instead of silently becoming an unrelated song.
+		selAlbum := ""
+		if len(fr.tracks) == 0 && fr.cursor >= 0 && fr.cursor < len(fr.albums) {
+			selAlbum = fr.albums[fr.cursor].BrowseID
+		}
 		fr.tracks = msg.tracks
 		fr.derivedAlbums = msg.derivedAlbums
 		fr.albums = mergeSearchAlbums(fr.derivedAlbums, fr.verticalAlbums)
+		if selAlbum != "" {
+			for i, a := range fr.albums {
+				if a.BrowseID == selAlbum {
+					fr.cursor = len(fr.tracks) + i
+					break
+				}
+			}
+		}
 		return m, nil
 
 	case albumSearchMsg:
@@ -725,6 +747,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
+				m.downgradeAuth()
 				m.setError("sign in to load your library — see README")
 			} else {
 				m.setError("could not load playlists: " + msg.err.Error())
@@ -732,6 +755,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // keep the mock playlists
 		}
 		m.playlists = msg.playlists
+		m.playlistsReal = true
 		if m.plCursor >= len(m.playlists) {
 			m.plCursor = 0
 		}
@@ -743,6 +767,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
+				m.downgradeAuth()
 				m.setError("sign in to load your library — see README")
 			} else {
 				m.setError("could not load " + msg.title + ": " + msg.err.Error())
@@ -966,6 +991,9 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.searchGen++
+			// Issuing a search supersedes any in-flight library load: its late
+			// result must not setMain over the upcoming results frame.
+			m.libGen++
 			m.setStatus("searching…")
 			// Songs and albums are fetched concurrently; whichever returns first
 			// renders, the other fills in its section on arrival.
@@ -1085,16 +1113,27 @@ func (m *Model) handleEnter() tea.Cmd {
 	case focusPlaylists:
 		if m.plCursor >= 0 && m.plCursor < len(m.playlists) {
 			pl := m.playlists[m.plCursor]
-			// A signed-in session loads the real playlist; otherwise the panel
-			// still holds mock playlists, played from the mock track sets.
-			if m.canLoadLibrary() {
+			// Only rows from a real LibraryPlaylists fill may hit the network:
+			// while the panel still holds mock playlists (sign-in pending, fill
+			// in flight, or fill failed) their fake IDs must not be browsed.
+			if m.canLoadLibrary() && m.playlistsReal {
 				m.libGen++
 				m.setStatus("loading " + pl.Title + "…")
 				m.setFocus(focusMain)
 				return playlistTracksCmd(m.c, pl.ID, pl.Title, m.libGen)
 			}
+			if m.playlistsReal {
+				// Real playlists but the session has since resolved anonymous
+				// (cookie rotated): there is no mock data for a real ID.
+				m.setError("sign in to load your library — see README")
+				return nil
+			}
 			m.setMain(pl.Title, mockPlaylistTracks(pl.ID))
 			m.setFocus(focusMain)
+			if m.c != nil && !m.authSignedIn {
+				// A client is present but the session is anonymous.
+				m.setError("sign in to load your library — see README")
+			}
 		}
 	case focusQueue:
 		if m.queueCursor < 0 || m.queueCursor >= m.q.Len() {
@@ -1375,20 +1414,47 @@ func (m *Model) pushMain(title string, tracks []model.Track) {
 // mergeSearchAlbums builds the rendered Albums section: the albums derived from
 // the full-catalog song hits come first (they reflect releases the degraded
 // album vertical withholds from anonymous sessions), then the album-vertical
-// results, deduped by BrowseID. Order within each source is preserved.
+// results, deduped by BrowseID. Order within each source is preserved. An album
+// present in both sources keeps its derived-first position but takes the
+// vertical's richer metadata (true album artists, Year, album cover) — the
+// derived ref only carries song-row stand-ins.
 func mergeSearchAlbums(derived, vertical []model.Album) []model.Album {
-	seen := make(map[string]bool, len(derived)+len(vertical))
+	index := make(map[string]int, len(derived)+len(vertical))
 	merged := make([]model.Album, 0, len(derived)+len(vertical))
 	for _, src := range [][]model.Album{derived, vertical} {
 		for _, a := range src {
-			if a.BrowseID == "" || seen[a.BrowseID] {
+			if a.BrowseID == "" {
 				continue
 			}
-			seen[a.BrowseID] = true
+			if i, ok := index[a.BrowseID]; ok {
+				merged[i] = enrichAlbum(merged[i], a)
+				continue
+			}
+			index[a.BrowseID] = len(merged)
 			merged = append(merged, a)
 		}
 	}
 	return merged
+}
+
+// enrichAlbum keeps dst's identity (BrowseID, Title, list position) but takes
+// src's metadata where it is richer: a derived album ref has no Year, the
+// song's artists (features included) and the song thumb, while the vertical's
+// record carries the real album artists, year and cover.
+func enrichAlbum(dst, src model.Album) model.Album {
+	if dst.Title == "" {
+		dst.Title = src.Title
+	}
+	if len(src.Artists) > 0 {
+		dst.Artists = src.Artists
+	}
+	if src.Year != "" {
+		dst.Year = src.Year
+	}
+	if src.ThumbURL != "" {
+		dst.ThumbURL = src.ThumbURL
+	}
+	return dst
 }
 
 // ensureSearchFrame returns the search-results frame for the current search
@@ -1493,6 +1559,17 @@ func (m *Model) setError(s string)  { m.status, m.statusErr = s, true }
 // Anonymous (or unresolved) sessions fall back to mock data instead.
 func (m Model) canLoadLibrary() bool {
 	return m.c != nil && m.authSignedIn
+}
+
+// downgradeAuth flips the resolved sign-in state to anonymous: a library browse
+// just came back as the logged-out page, so the cookie rotated mid-session
+// (Google does this within hours — see README). The header indicator switches
+// to the stale-cookie hint and library actions stop re-issuing doomed browses,
+// keeping the indicator and the library behavior consistent.
+func (m *Model) downgradeAuth() {
+	m.authChecked = true
+	m.authSignedIn = false
+	m.authName = ""
 }
 
 // authIndicator returns the styled sign-in status shown at the right end of the

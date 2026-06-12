@@ -144,7 +144,10 @@ The header in the logo area then shows your live sign-in state:
 go stale within hours: Google continuously rotates the `__Secure-*PSIDTS`
 cookies, and once the browser rotates them your copied snapshot is invalidated —
 tubeamp silently falls back to anonymous (which is exactly what the `○ anonymous`
-indicator is for). The reliable trick is to copy the cookie from a **private /
+indicator is for). If the rotation happens mid-session — sign-in succeeded at
+startup but a later library load comes back logged out — the indicator
+downgrades to `○ anonymous` on the spot instead of contradicting the failing
+loads. The reliable trick is to copy the cookie from a **private /
 incognito** window: log in there, grab the Cookie header, then **close the window
 without logging out**. A closed incognito session is not rotated, so that cookie
 keeps working far longer.

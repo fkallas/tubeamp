@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fkallas/tubeamp/internal/theme"
 )
 
@@ -28,9 +29,10 @@ const appVersion = "v0.1.0"
 //
 // Row 2  — "╰─╯" in accent + a short decorative rule in Muted (up to ~28
 //
-//	cols); the already-styled sign-in indicator (when non-empty and it
-//	fits) is placed at the far right, otherwise plain spaces pad to
-//	termWidth.
+//	cols); the already-styled sign-in indicator (when non-empty) is placed
+//	at the far right, ANSI-aware-truncated with an ellipsis when it would
+//	not fit (a long account name must clip, not vanish); plain spaces pad
+//	to termWidth.
 func renderLogo(th *theme.Theme, termWidth, termHeight int, indicator string) string {
 	if termHeight < logoMinTermHeight {
 		return ""
@@ -72,6 +74,13 @@ func renderLogo(th *theme.Theme, termWidth, termHeight int, indicator string) st
 	rule := th.AccentStyle().Render("╰─╯") + th.Muted().Render(strings.Repeat("─", dashCount))
 	ruleW := lipgloss.Width(rule)
 	indW := lipgloss.Width(indicator)
+
+	// A long account name must not silently drop the whole indicator: clip it
+	// (ANSI-aware, ellipsis tail) to the columns left of the rule + 1-col gap.
+	if avail := termWidth - ruleW - 1; indicator != "" && indW > avail && avail >= 2 {
+		indicator = ansi.Truncate(indicator, avail, "…")
+		indW = lipgloss.Width(indicator)
+	}
 
 	var row2 string
 	if indicator != "" && ruleW+1+indW <= termWidth {
