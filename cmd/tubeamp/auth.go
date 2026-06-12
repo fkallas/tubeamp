@@ -18,6 +18,29 @@ import (
 // a real browser store.
 var authImport = auth.ImportFromBrowser
 
+// browserRunning reports whether the target browser is currently running. It is a
+// package var so tests can stub it without inspecting the real process table.
+var browserRunning = auth.IsBrowserRunning
+
+// anonymousAdvice returns the advice line printed after a -auth import that did
+// NOT produce a signed-in session. signedIn short-circuits to "" (the caller
+// prints the success line instead, so there is no advice to give).
+//
+// The #1 cause of a signed-in user importing an anonymous cookie set is a
+// RUNNING browser: the fresh login sits in the browser's memory and the SQLite
+// WAL, while the on-disk snapshot kooky reads is stale. So when the browser is
+// running we tell the user to quit it and retry rather than the misleading
+// "are you logged in?" line; otherwise we suggest signing in / another browser.
+func anonymousAdvice(browser string, running, signedIn bool) string {
+	if signedIn {
+		return ""
+	}
+	if running {
+		return fmt.Sprintf("%s is running — cookies copied from a running browser are often stale. Quit %s completely (Cmd-Q) and run 'tubeamp -auth %s' again.", browser, browser, browser)
+	}
+	return fmt.Sprintf("imported, but YouTube still resolved anonymous — are you logged into %s? Try signing in there, or import from another browser.", browser)
+}
+
 // confirmSignIn builds a throwaway client from the just-written auth file and
 // probes the live sign-in state under a short timeout. A non-nil err means the
 // probe itself failed (file unreadable, network down, timeout) — the sign-in
@@ -114,7 +137,10 @@ func runAuthImport(out, errOut io.Writer, cfg *config.Config, browser string) in
 	case signedIn:
 		fmt.Fprintf(out, "signed in as %s\n", name)
 	default:
-		fmt.Fprintf(out, "imported, but YouTube still resolved anonymous — are you logged into %s?\n", browser)
+		// Anonymous: the cookies imported but resolve logged out. Detecting a
+		// running browser (best-effort; never fails the command) lets us give the
+		// quit-and-retry advice instead of the misleading "are you logged in?".
+		fmt.Fprintln(out, anonymousAdvice(browser, browserRunning(browser), false))
 	}
 	return 0
 }

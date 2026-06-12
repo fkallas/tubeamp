@@ -132,22 +132,94 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error) {
 	return strings.Join(parts, "; "), nil
 }
 
+// storeReader is the slice of a cookie store's behaviour the profile selector
+// needs: assemble the store's Cookie header (ErrNoSAPISID when it holds no
+// session) and report whether it is the browser's default profile. kooky's
+// CookieStore satisfies it via kookyStore; tests inject fakes.
+type storeReader interface {
+	header(ctx context.Context) (string, error)
+	isDefaultProfile() bool
+}
+
+// kookyStore adapts a kooky.CookieStore to storeReader. It does not close the
+// underlying store; ImportFromBrowser owns that (the selector may stop early).
+type kookyStore struct {
+	st      kooky.CookieStore
+	browser string
+}
+
+func (k *kookyStore) header(ctx context.Context) (string, error) {
+	return readStoreHeader(ctx, k.st, k.browser)
+}
+
+func (k *kookyStore) isDefaultProfile() bool { return k.st.IsDefaultProfile() }
+
+// pickStoreHeader assembles a Cookie header from the first usable store among
+// candidates, preferring the browser's DEFAULT profile when several profiles
+// carry a session. This stops a stale secondary profile (e.g. an old, empty
+// Firefox *.default beside the active *.default-release that profiles.ini marks
+// Default) from winning just because kooky iterated it first.
+//
+// Selection: the first default-profile store that yields a SAPISID wins
+// outright; otherwise the first non-default store with a SAPISID is used (so a
+// session living only on a secondary profile is still found). When no store
+// holds a session, a real read error (e.g. a macOS Keychain denial) is surfaced
+// over the bare ErrNoSAPISID.
+func pickStoreHeader(ctx context.Context, stores []storeReader) (string, error) {
+	var (
+		fallback     string
+		haveFallback bool
+		lastErr      error
+	)
+	for _, s := range stores {
+		header, err := s.header(ctx)
+		if err != nil {
+			if !errors.Is(err, ErrNoSAPISID) {
+				lastErr = err // a genuine read failure, not just "no session"
+			}
+			continue
+		}
+		if s.isDefaultProfile() {
+			return header, nil
+		}
+		if !haveFallback {
+			fallback, haveFallback = header, true
+		}
+	}
+	if haveFallback {
+		return fallback, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", ErrNoSAPISID
+}
+
 // ImportFromBrowser reads the YouTube/Google sign-in cookies from the named
 // browser's local cookie store and assembles them into the Cookie header tubeamp
 // sends. browser is one of "chrome", "chromium", "edge", "brave", "firefox" or
 // "safari"; "" or "auto" tries every supported store and returns the first that
 // yields a usable (SAPISID-bearing) set.
 //
+// When a browser exposes several profiles (e.g. Firefox's *.default and
+// *.default-release), the store whose cookie DB actually holds a session is
+// chosen, preferring the profile profiles.ini marks as the default — so a stale,
+// empty secondary profile never wins (see pickStoreHeader).
+//
 // Locked SQLite stores (a running Chrome) are handled by kooky, which reads
-// through a temporary copy, so a running browser does not block the read. On
+// through a temporary copy, so a running browser does not block the read.
+// CAVEAT: that on-disk snapshot can be stale — a browser that is open keeps a
+// fresh login in memory and the SQLite WAL, so a genuinely-signed-in user can
+// still import cookies that resolve anonymous; quitting the browser first is the
+// fix (the -auth command says so when it detects the browser is running). On
 // macOS the Chrome-family stores are encrypted with a key held in the login
 // Keychain: the first read raises a consent prompt, and a denial (or Chrome's
 // newer app-bound encryption refusing external reads) is surfaced as a clear,
 // actionable error rather than a raw decryption failure.
 //
-// It returns ErrNoStore when no store is found for the requested browser and an
-// error wrapping ErrNoSAPISID when stores were found but none held a signed-in
-// session.
+// It returns ErrNoStore when no store is found for the requested browser and
+// ErrNoSAPISID (or the more informative read error) when stores were found but
+// none held a signed-in session.
 func ImportFromBrowser(browser string) (string, error) {
 	want := strings.ToLower(strings.TrimSpace(browser))
 	if want == "auto" {
@@ -162,10 +234,7 @@ func ImportFromBrowser(browser string) (string, error) {
 
 	stores := kooky.FindAllCookieStores(ctx)
 
-	var (
-		found   bool
-		lastErr error
-	)
+	var candidates []storeReader
 	for _, st := range stores {
 		if st == nil {
 			continue
@@ -173,40 +242,39 @@ func ImportFromBrowser(browser string) (string, error) {
 		name := strings.ToLower(st.Browser())
 		if want != "" {
 			if name != want {
+				st.Close()
 				continue
 			}
 		} else if !supportedBrowsers[name] {
+			st.Close()
 			continue
 		}
-		found = true
-
-		header, err := readStore(ctx, st, name)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return header, nil
+		candidates = append(candidates, &kookyStore{st: st, browser: name})
 	}
+	// Close every store we kept once selection is done (pickStoreHeader may stop
+	// before reading them all).
+	defer func() {
+		for _, c := range candidates {
+			if ks, ok := c.(*kookyStore); ok {
+				ks.st.Close()
+			}
+		}
+	}()
 
-	switch {
-	case !found && want != "":
-		return "", fmt.Errorf("%w for %q (is it installed?)", ErrNoStore, want)
-	case !found:
+	if len(candidates) == 0 {
+		if want != "" {
+			return "", fmt.Errorf("%w for %q (is it installed?)", ErrNoStore, want)
+		}
 		return "", fmt.Errorf("%w: no supported browser detected", ErrNoStore)
-	case lastErr != nil:
-		return "", lastErr
-	default:
-		return "", ErrNoSAPISID
 	}
+	return pickStoreHeader(ctx, candidates)
 }
 
-// readStore reads one cookie store, keeps only the YouTube/Google cookies, and
-// assembles the header. A decryption failure on a Chrome-family store (a macOS
-// Keychain denial, or Chrome's app-bound encryption) is wrapped with an
-// actionable hint.
-func readStore(ctx context.Context, st kooky.CookieStore, browser string) (string, error) {
-	defer st.Close()
-
+// readStoreHeader reads one cookie store, keeps only the YouTube/Google cookies,
+// and assembles the header. It does NOT close the store (the caller owns that).
+// A decryption failure on a Chrome-family store (a macOS Keychain denial, or
+// Chrome's app-bound encryption) is wrapped with an actionable hint.
+func readStoreHeader(ctx context.Context, st kooky.CookieStore, browser string) (string, error) {
 	all, readErr := st.TraverseCookies().ReadAllCookies(ctx)
 
 	cookies := make([]*http.Cookie, 0, len(all))

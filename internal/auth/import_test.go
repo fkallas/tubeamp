@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -111,6 +112,157 @@ func TestImportFromBrowser_unsupported(t *testing.T) {
 	if _, err := ImportFromBrowser("netscape4"); err == nil {
 		t.Error("expected error for unsupported browser, got nil")
 	}
+}
+
+// fakeStore is an injected storeReader: it assembles a header from a fixed cookie
+// set (so the selector's profile logic can be tested without a real browser) and
+// reports whether it is a browser's default profile. A non-nil readErr simulates
+// a store-level read failure (e.g. a Keychain denial).
+type fakeStore struct {
+	cookies   []*http.Cookie
+	isDefault bool
+	readErr   error
+}
+
+func (f fakeStore) isDefaultProfile() bool { return f.isDefault }
+
+func (f fakeStore) header(context.Context) (string, error) {
+	if f.readErr != nil {
+		return "", f.readErr
+	}
+	return AssembleCookieHeader(f.cookies)
+}
+
+func sapisidSet(value string) []*http.Cookie {
+	return []*http.Cookie{cookie("SAPISID", value), cookie("SID", "sid")}
+}
+
+// TestPickStoreHeader_skipsEmpty: among several candidate profiles, the one whose
+// cookie DB actually carries a SAPISID is chosen, not an empty stale profile that
+// happens to be iterated first.
+func TestPickStoreHeader_skipsEmpty(t *testing.T) {
+	stores := []storeReader{
+		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}},  // no SAPISID
+		fakeStore{cookies: sapisidSet("real")},                  // the real session
+		fakeStore{cookies: []*http.Cookie{cookie("PREF", "p")}}, // another empty one
+	}
+	got, err := pickStoreHeader(context.Background(), stores)
+	if err != nil {
+		t.Fatalf("pickStoreHeader: %v", err)
+	}
+	if !strings.Contains(got, "SAPISID=real") {
+		t.Errorf("header = %q, want the SAPISID-bearing store", got)
+	}
+}
+
+// TestPickStoreHeader_prefersDefaultProfile: when several profiles carry a
+// SAPISID, the browser's DEFAULT profile wins regardless of iteration order —
+// this is the fix for kooky picking a stale *.default over the active
+// *.default-release that profiles.ini marks as default.
+func TestPickStoreHeader_prefersDefaultProfile(t *testing.T) {
+	stale := fakeStore{cookies: sapisidSet("stale")}                    // secondary profile
+	active := fakeStore{cookies: sapisidSet("active"), isDefault: true} // default profile
+
+	for _, tc := range []struct {
+		name   string
+		stores []storeReader
+	}{
+		{"stale-first", []storeReader{stale, active}},
+		{"default-first", []storeReader{active, stale}},
+	} {
+		got, err := pickStoreHeader(context.Background(), tc.stores)
+		if err != nil {
+			t.Fatalf("%s: pickStoreHeader: %v", tc.name, err)
+		}
+		if !strings.Contains(got, "SAPISID=active") {
+			t.Errorf("%s: header = %q, want the default profile's session", tc.name, got)
+		}
+	}
+}
+
+// TestPickStoreHeader_nonDefaultFallback: a session that lives only on a
+// non-default profile is still found when no default profile carries one.
+func TestPickStoreHeader_nonDefaultFallback(t *testing.T) {
+	stores := []storeReader{
+		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}, isDefault: true}, // default, but empty
+		fakeStore{cookies: sapisidSet("secondary")},                             // session on a secondary profile
+	}
+	got, err := pickStoreHeader(context.Background(), stores)
+	if err != nil {
+		t.Fatalf("pickStoreHeader: %v", err)
+	}
+	if !strings.Contains(got, "SAPISID=secondary") {
+		t.Errorf("header = %q, want the secondary profile's session", got)
+	}
+}
+
+// TestPickStoreHeader_noSession: when no candidate holds a SAPISID, ErrNoSAPISID
+// is returned (matchable with errors.Is).
+func TestPickStoreHeader_noSession(t *testing.T) {
+	stores := []storeReader{
+		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}},
+		fakeStore{cookies: []*http.Cookie{cookie("PREF", "p")}},
+	}
+	if _, err := pickStoreHeader(context.Background(), stores); !errors.Is(err, ErrNoSAPISID) {
+		t.Errorf("err = %v, want ErrNoSAPISID", err)
+	}
+}
+
+// TestPickStoreHeader_readErrorSurfaced: a genuine read failure (not just "no
+// session") is surfaced over the bare ErrNoSAPISID when nothing else yields a
+// session, so callers see the informative error (e.g. a Keychain denial).
+func TestPickStoreHeader_readErrorSurfaced(t *testing.T) {
+	wantErr := errors.New("keychain denied")
+	stores := []storeReader{
+		fakeStore{readErr: wantErr},
+		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}}, // no session
+	}
+	_, err := pickStoreHeader(context.Background(), stores)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want the read error", err)
+	}
+}
+
+// TestPickStoreHeader_readErrorButSessionWins: a read failure on one profile does
+// not stop a sibling profile's session from being used.
+func TestPickStoreHeader_readErrorButSessionWins(t *testing.T) {
+	stores := []storeReader{
+		fakeStore{readErr: errors.New("locked")},
+		fakeStore{cookies: sapisidSet("ok")},
+	}
+	got, err := pickStoreHeader(context.Background(), stores)
+	if err != nil {
+		t.Fatalf("pickStoreHeader: %v", err)
+	}
+	if !strings.Contains(got, "SAPISID=ok") {
+		t.Errorf("header = %q, want the readable store's session", got)
+	}
+}
+
+// TestIsBrowserRunning_unsupported asserts the running-browser detection reports
+// false (never errors) for an unsupported browser id, without touching the
+// process table.
+func TestIsBrowserRunning_unsupported(t *testing.T) {
+	if IsBrowserRunning("netscape4") {
+		t.Error("IsBrowserRunning(unsupported) = true, want false")
+	}
+	if IsBrowserRunning("auto") {
+		t.Error("IsBrowserRunning(auto) = true, want false (no single process to attribute)")
+	}
+}
+
+// TestIsBrowserRunning_live exercises the real process-table check. It is skipped
+// by default; set TUBEAMP_LIVE_PROC=1 (and optionally TUBEAMP_LIVE_PROC_BROWSER)
+// to run it against the machine's actual processes.
+func TestIsBrowserRunning_live(t *testing.T) {
+	if os.Getenv("TUBEAMP_LIVE_PROC") != "1" {
+		t.Skip("set TUBEAMP_LIVE_PROC=1 (and optionally TUBEAMP_LIVE_PROC_BROWSER) to run the real process check")
+	}
+	browser := os.Getenv("TUBEAMP_LIVE_PROC_BROWSER")
+	if browser == "" {
+		browser = "firefox"
+	}
+	t.Logf("IsBrowserRunning(%q) = %v", browser, IsBrowserRunning(browser))
 }
 
 // TestImportFromBrowser_live exercises the real kooky-backed import against the

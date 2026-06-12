@@ -454,20 +454,40 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error)
 // ImportFromBrowser reads the YouTube/Google sign-in cookies (domains
 // music.youtube.com / .youtube.com / .google.com) from the named browser's store
 // and assembles the Cookie header. browser ∈ {chrome,chromium,edge,brave,firefox,
-// safari}; "" or "auto" tries every supported store and returns the first that
-// yields a SAPISID. kooky reads locked SQLite stores through a temp copy (a
-// running browser does not block it). On macOS the Chrome family needs Keychain
-// access to decrypt; a denial (or Chrome app-bound encryption) is surfaced as a
-// clear, actionable error. ErrNoStore when no store is found for the browser;
-// an error wrapping ErrNoSAPISID when stores exist but none holds a session.
+// safari}; "" or "auto" tries every supported store. kooky reads locked SQLite
+// stores through a temp copy (a running browser does not block it) — but that
+// on-disk snapshot can be STALE: a browser that is open keeps a fresh login in
+// memory + the SQLite WAL, so a signed-in user can still import an anonymous set
+// (quitting the browser first is the fix; the -auth command detects this and
+// says so). On macOS the Chrome family needs Keychain access to decrypt; a denial
+// (or Chrome app-bound encryption) is surfaced as a clear, actionable error.
+// ErrNoStore when no store is found for the browser; ErrNoSAPISID (or the more
+// informative read error) when stores exist but none holds a session.
+//
+// PROFILE SELECTION: when a browser exposes several profiles, the store whose
+// cookie DB actually holds a SAPISID is chosen, preferring the profile
+// profiles.ini marks Default (Firefox's *.default-release) over an empty/stale
+// secondary (*.default) — so a stale profile never wins on iteration order. A
+// session living only on a non-default profile is still used when no default
+// profile carries one. This selection (pickStoreHeader, over an injectable
+// storeReader interface) is unit-tested with fake stores.
 func ImportFromBrowser(browser string) (cookieHeader string, err error)
+
+// IsBrowserRunning reports whether the named browser process is running
+// (pgrep on darwin/linux; checks "Google Chrome"/"firefox"/"Brave Browser"/
+// "Microsoft Edge"/"Safari"/"Chromium"). Strictly best-effort: an unsupported
+// browser, "" / "auto", a non-darwin/linux OS, or a missing pgrep all report
+// false. It only sharpens the -auth message and can never make the import fail.
+func IsBrowserRunning(browser string) bool
 
 var ErrNoSAPISID = errors.New(...) // no signing cookie in the set
 var ErrNoStore   = errors.New(...) // no cookie store found for the browser
 ```
 
 A real-browser read is gated behind `TUBEAMP_LIVE_IMPORT=1` (`t.Skip` by default,
-optional `TUBEAMP_LIVE_IMPORT_BROWSER`); it never logs the cookie value.
+optional `TUBEAMP_LIVE_IMPORT_BROWSER`); it never logs the cookie value. The real
+process check is gated behind `TUBEAMP_LIVE_PROC=1` (optional
+`TUBEAMP_LIVE_PROC_BROWSER`).
 
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 
@@ -705,11 +725,18 @@ does not open the TUI or touch the daemon). It imports via `auth.ImportFromBrows
 (stubbable `authImport` package var), writes the auth file with the shared
 `ytm.WriteAuthFile`, persists the browser as `cfg.AuthBrowser`, then confirms with
 a bounded `AccountInfo` (stubbable `confirmSignIn` var, which returns the probe
-error distinctly) — printing `signed in as <name>`, or `imported, but YouTube
-still resolved anonymous — are you logged into <browser>?`, or — when only the
-confirmation probe failed (offline/timeout; the import itself succeeded) —
+error distinctly) — printing `signed in as <name>`, or the anonymous advice from
+the pure `anonymousAdvice(browser, running, signedIn)` selector, or — when only
+the confirmation probe failed (offline/timeout; the import itself succeeded) —
 `imported from <browser>, but could not confirm the sign-in (<err>) — check
-later with tubeamp -status`. NEVER prints cookie values. The `-auth` flag accepts a
+later with tubeamp -status`. The anonymous advice depends on whether the browser
+is running (`auth.IsBrowserRunning`, via the stubbable `browserRunning` var): a
+RUNNING browser yields `<browser> is running — cookies copied from a running
+browser are often stale. Quit <browser> completely (Cmd-Q) and run 'tubeamp -auth
+<browser>' again.` (the running browser holds the fresh login in memory/WAL,
+which the on-disk snapshot lacks); otherwise the `are you logged into <browser>?
+Try signing in there, or import from another browser.` hint. The detection never
+fails the command. NEVER prints cookie values. The `-auth` flag accepts a
 value (`-auth chrome`, `-auth=chrome`) and stands alone (bare `-auth` ⇒ "auto"
 via a custom `flag.Value` with `IsBoolFlag`; the space form `-auth chrome` is
 recovered from the trailing positional).

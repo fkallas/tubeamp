@@ -28,6 +28,15 @@ func stubAuthImportConfirmErr(t *testing.T, header string, importErr error, name
 	t.Cleanup(func() { authImport, confirmSignIn = origImport, origConfirm })
 }
 
+// stubBrowserRunning pins the running-browser detection so the -auth message is
+// deterministic in tests (the real check shells out to pgrep).
+func stubBrowserRunning(t *testing.T, running bool) {
+	t.Helper()
+	orig := browserRunning
+	browserRunning = func(string) bool { return running }
+	t.Cleanup(func() { browserRunning = orig })
+}
+
 // TestRunAuthImport_signedIn: a successful import writes the auth file (0600),
 // persists the browser to config, prints "signed in as <name>", and never leaks
 // the cookie value to stdout/stderr.
@@ -84,20 +93,75 @@ func TestRunAuthImport_signedIn(t *testing.T) {
 }
 
 // TestRunAuthImport_anonymous: a successful import that still resolves anonymous
-// prints the are-you-logged-in hint.
+// while the browser is NOT running prints the are-you-logged-in hint.
 func TestRunAuthImport_anonymous(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 
 	stubAuthImport(t, "SAPISID=x", nil, "", false)
+	stubBrowserRunning(t, false)
 
 	var out, errOut bytes.Buffer
 	if code := runAuthImport(&out, &errOut, config.Default(), "firefox"); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if got := out.String(); !strings.Contains(got, "still resolved anonymous") || !strings.Contains(got, "firefox") {
+	got := out.String()
+	if !strings.Contains(got, "still resolved anonymous") || !strings.Contains(got, "firefox") {
 		t.Errorf("stdout = %q, want anonymous hint mentioning firefox", got)
+	}
+	if strings.Contains(got, "is running") {
+		t.Errorf("stdout = %q: must not give the quit-and-retry advice when the browser is not running", got)
+	}
+}
+
+// TestRunAuthImport_anonymousRunning: a successful import that resolves anonymous
+// while the browser IS running replaces the "are you logged in?" line with the
+// quit-the-browser-and-retry advice (a running browser holds fresh cookies in
+// memory/WAL, so the on-disk snapshot is stale).
+func TestRunAuthImport_anonymousRunning(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	stubAuthImport(t, "SAPISID=x", nil, "", false)
+	stubBrowserRunning(t, true)
+
+	var out, errOut bytes.Buffer
+	if code := runAuthImport(&out, &errOut, config.Default(), "firefox"); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "firefox is running") || !strings.Contains(got, "Quit firefox") {
+		t.Errorf("stdout = %q, want the quit-and-retry advice for a running browser", got)
+	}
+	if strings.Contains(got, "are you logged into") {
+		t.Errorf("stdout = %q: the running-browser case must replace the are-you-logged-in line", got)
+	}
+}
+
+// TestAnonymousAdvice covers the pure message selector: signed-in => no advice;
+// anonymous + running => quit-and-retry; anonymous + not running => sign-in hint.
+func TestAnonymousAdvice(t *testing.T) {
+	if got := anonymousAdvice("chrome", true, true); got != "" {
+		t.Errorf("signed-in advice = %q, want empty", got)
+	}
+	if got := anonymousAdvice("chrome", false, true); got != "" {
+		t.Errorf("signed-in advice (not running) = %q, want empty", got)
+	}
+	running := anonymousAdvice("chrome", true, false)
+	if !strings.Contains(running, "chrome is running") || !strings.Contains(running, "Quit chrome") || !strings.Contains(running, "tubeamp -auth chrome") {
+		t.Errorf("running advice = %q, want quit-and-retry guidance", running)
+	}
+	if strings.Contains(running, "are you logged into") {
+		t.Errorf("running advice = %q: must not include the are-you-logged-in line", running)
+	}
+	notRunning := anonymousAdvice("chrome", false, false)
+	if !strings.Contains(notRunning, "are you logged into chrome") {
+		t.Errorf("not-running advice = %q, want the are-you-logged-in hint", notRunning)
+	}
+	if strings.Contains(notRunning, "is running") {
+		t.Errorf("not-running advice = %q: must not claim the browser is running", notRunning)
 	}
 }
 

@@ -136,15 +136,34 @@ tubeamp -auth chrome     # or: chromium, edge, brave, firefox, safari
 tubeamp -auth            # bare -auth = "auto": try every supported browser
 ```
 
+> **Quit the browser first.** The single most common reason a signed-in user
+> imports cookies that come back **anonymous** is that the browser is still
+> running: a fresh login lives in the browser's memory and the SQLite
+> write-ahead log, while tubeamp can only read the *on-disk snapshot*, which is
+> stale. **Fully quit the browser** (on macOS, Cmd-Q — not just closing the
+> window) before running `tubeamp -auth`. If you see the anonymous result and
+> the browser is still open, tubeamp now tells you exactly this and to retry
+> after quitting.
+
 It then confirms with the live API and prints `signed in as <name>` (or, if the
-cookies still resolve logged out, `imported, but YouTube still resolved
-anonymous — are you logged into <browser>?`; if the confirmation itself could
-not run — offline, timeout — it says so instead of blaming the cookies, and you
-can check later with `tubeamp -status`). The browser you import from is
-remembered in `config.yaml` (`auth_browser`), and the TUI uses it to silently
-re-import a session that has gone stale (see the rotation note below). A running
-browser does not block the read — tubeamp reads through a temporary copy of the
-(locked) cookie database.
+cookies still resolve logged out, the anonymous advice — `imported, but YouTube
+still resolved anonymous — are you logged into <browser>? Try signing in there,
+or import from another browser.`, or, when the browser is **running**,
+`<browser> is running — cookies copied from a running browser are often stale.
+Quit <browser> completely (Cmd-Q) and run 'tubeamp -auth <browser>' again.`; if
+the confirmation itself could not run — offline, timeout — it says so instead of
+blaming the cookies, and you can check later with `tubeamp -status`). The browser
+you import from is remembered in `config.yaml` (`auth_browser`), and the TUI uses
+it to silently re-import a session that has gone stale (see the rotation note
+below). A running browser does not *block* the read — tubeamp reads through a
+temporary copy of the (locked) cookie database — but, as above, that copy can be
+stale, so quitting first is what makes the import reliable.
+
+**Multiple profiles.** A browser with several profiles (e.g. Firefox's
+`*.default` beside the active `*.default-release`) imports from the profile that
+actually holds your Google login: tubeamp picks the store whose cookie DB carries
+a SAPISID, preferring the profile marked default in `profiles.ini`, so a stale or
+empty secondary profile never wins.
 
 - **macOS Keychain prompt.** Chrome-family cookies (Chrome/Chromium/Edge/Brave)
   are encrypted with a key kept in your login Keychain, so the first Chrome
