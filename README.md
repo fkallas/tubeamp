@@ -4,7 +4,7 @@ A Lazygit-inspired terminal UI for YouTube Music, written in Go.
 
 Stacked, numbered panels on the left (Library / Playlists / Queue), a contextual
 main view on the right, a persistent player bar with pixel-art album covers, and
-vim-style navigation throughout. Themeable via simple YAML files.
+number-key panel switching with arrow-key navigation. Themeable via simple YAML files.
 
 ## Status
 
@@ -29,8 +29,8 @@ go build ./cmd/tubeamp
 ./tubeamp
 ```
 
-Keys: `1/2/3` jump to a panel, `tab` cycles, `j/k` move, `enter` plays,
-`space` pause, `n`/`p` next/previous, `,`/`.` seek, `+/-` volume, `/` search,
+Keys: `1/2/3/4` jump to a panel, `↑/↓` move, `enter` plays,
+`space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `+/-` volume, `/` search,
 `T` theme picker, `?` help, `q` quit.
 
 ## Themes

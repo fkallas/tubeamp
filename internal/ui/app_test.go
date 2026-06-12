@@ -58,18 +58,14 @@ func TestFocusMovement(t *testing.T) {
 		t.Errorf("after '3' focus = %q, want Queue", got)
 	}
 
+	m = send(m, runes("4"))
+	if got := m.FocusedPanel(); got != "Main" {
+		t.Errorf("after '4' focus = %q, want Main", got)
+	}
+
 	m = send(m, runes("1"))
 	if got := m.FocusedPanel(); got != "Library" {
 		t.Errorf("after '1' focus = %q, want Library", got)
-	}
-
-	// tab cycles Library -> Playlists -> Queue -> Main -> Library.
-	want := []string{"Playlists", "Queue", "Main", "Library"}
-	for _, w := range want {
-		m = send(m, tea.KeyMsg{Type: tea.KeyTab})
-		if got := m.FocusedPanel(); got != w {
-			t.Errorf("after tab focus = %q, want %q", got, w)
-		}
 	}
 }
 
@@ -181,9 +177,9 @@ func TestTooSmallNotice(t *testing.T) {
 func TestEnterOnMainWithNilPlayerSetsStatus(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	// Move focus to the main view, then activate the selected track.
-	m = send(m, tea.KeyMsg{Type: tea.KeyRight})
+	m = send(m, runes("4"))
 	if got := m.FocusedPanel(); got != "Main" {
-		t.Fatalf("after right focus = %q, want Main", got)
+		t.Fatalf("after '4' focus = %q, want Main", got)
 	}
 	m = send(m, tea.KeyMsg{Type: tea.KeyEnter})
 

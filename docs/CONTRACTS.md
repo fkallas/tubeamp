@@ -266,7 +266,7 @@ func CompositeCenter(overlay, background string) string
 ### Layout
 
 ```
-╭─1 Library──╮╭─ <context title> ───────────────╮
+╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
 ╰────────────╯│                                 │
 ╭─2 Playlists╮│      main view                  │
@@ -287,14 +287,12 @@ everywhere; below ~70×20 show a centered "terminal too small" notice.
 
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 
-Global: `1/2/3` focus panel; `tab`/`shift+tab` cycle Library→Playlists→Queue→Main;
-`h/←`,`l/→` move between left column and main (when not seeking — seek only
-when main/queue focused? NO: keep it simple, `h/l` switch columns, `,`/`.`
-seek -5s/+5s); `space` pause; `n`/`p` next/previous track; `+`/`=`/`-` volume;
-`m` mute; `/` search overlay; `T` theme picker; `?` help overlay; `q`/`ctrl+c`
-quit; `esc` closes overlay / pops view stack.
+Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main
+view; `←`/`→` seek -5s/+5s; `space` pause; `n`/`p` next/previous track;
+`+`/`=`/`-` volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
+overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 
-Per panel: `j/k`/arrows move selection; `g/G` top/bottom; `enter` activates.
+Per panel: `↑`/`↓` arrows move selection; `g/G` top/bottom; `enter` activates.
 Library/Playlists `enter` → load (mock) tracks into main view. Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
 `A` insert-next. Queue: `enter` jump-to-track, `d` remove, `J/K` move item,

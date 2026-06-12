@@ -74,8 +74,7 @@ type Model struct {
 
 	width, height int
 
-	focus    focusArea
-	lastLeft focusArea // last-focused left-column panel (for h/l switching)
+	focus focusArea
 
 	// Left-column selection cursors.
 	libItems    []string
@@ -136,7 +135,6 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		q:            q,
 		keys:         keymap.Default(),
 		focus:        focusLibrary,
-		lastLeft:     focusLibrary,
 		libItems:     libraryItems(),
 		playlists:    mockPlaylists(),
 		search:       overlay.NewSearch(),
@@ -437,18 +435,8 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setFocus(focusPlaylists)
 	case key.Matches(msg, k.Focus3):
 		m.setFocus(focusQueue)
-	case key.Matches(msg, k.Tab):
-		m.setFocus((m.focus + 1) % 4)
-	case key.Matches(msg, k.ShiftTab):
-		m.setFocus((m.focus + 3) % 4)
-	case key.Matches(msg, k.Left):
-		if m.focus == focusMain {
-			m.setFocus(m.lastLeft)
-		}
-	case key.Matches(msg, k.Right):
-		if m.focus != focusMain {
-			m.setFocus(focusMain)
-		}
+	case key.Matches(msg, k.Focus4):
+		m.setFocus(focusMain)
 
 	case key.Matches(msg, k.Esc):
 		if len(m.stack) > 1 {
@@ -589,9 +577,6 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) setFocus(f focusArea) {
 	m.focus = f
-	if f != focusMain {
-		m.lastLeft = f
-	}
 }
 
 // listSize returns the cursor pointer and item count for the focused panel.
@@ -835,7 +820,7 @@ func (m Model) View() string {
 	if m.hasNow {
 		playingID = m.nowPlaying.VideoID
 	}
-	mainBox := panels.MainView(m.th, top.title, top.tracks, top.cursor, playingID, mainW, topH, m.focus == focusMain)
+	mainBox := panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, topH, m.focus == focusMain)
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, mainBox)
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
@@ -910,17 +895,17 @@ func (m Model) contextHints() []hint {
 	case overlaySearch:
 		return []hint{{k.Enter.Help().Key, "search"}, {k.Esc.Help().Key, "cancel"}}
 	case overlayTheme:
-		return []hint{{"j/k", "preview"}, {k.Enter.Help().Key, "keep"}, {k.Esc.Help().Key, "revert"}}
+		return []hint{{"↑/↓", "preview"}, {k.Enter.Help().Key, "keep"}, {k.Esc.Help().Key, "revert"}}
 	}
 	switch m.focus {
 	case focusLibrary, focusPlaylists:
-		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "open"}, {k.Tab.Help().Key, "focus"},
+		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "open"}, {"1-4", "focus"},
 			{k.Search.Help().Key, "search"}, {k.Theme.Help().Key, "theme"}, {k.Help.Help().Key, "help"}}
 	case focusQueue:
-		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
+		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
 			{"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}, {k.Help.Help().Key, "help"}}
 	default: // focusMain
-		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
+		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
 			{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 	}
 }
