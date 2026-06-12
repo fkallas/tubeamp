@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -47,6 +48,12 @@ const (
 	connectBudget = 5 * time.Second
 	// connectRetry is the delay between socket dial attempts.
 	connectRetry = 50 * time.Millisecond
+	// quitExitBudget bounds how long Quit waits for the daemon to die after
+	// each escalation step (quit IPC, SIGTERM, SIGKILL).
+	quitExitBudget = 2 * time.Second
+	// quitPollInterval is the delay between liveness probes while waiting for
+	// the daemon to exit.
+	quitPollInterval = 25 * time.Millisecond
 	// volumeMin and volumeMax bound SetVolume (mpv accepts 0..max-volume).
 	volumeMin = 0
 	volumeMax = 120
@@ -103,6 +110,7 @@ type Player struct {
 	writeMu sync.Mutex // serializes writes on conn
 
 	cmdTimeout time.Duration // bound on a synchronous command's reply wait
+	quitBudget time.Duration // per-step wait for the daemon to exit in Quit
 
 	mu      sync.Mutex                // guards pending and the closed check
 	pending map[int]chan *ipcResponse // request_id -> reply channel
@@ -154,6 +162,7 @@ func newConn(conn net.Conn) *Player {
 	p := &Player{
 		conn:       conn,
 		cmdTimeout: commandTimeout,
+		quitBudget: quitExitBudget,
 		pending:    make(map[int]chan *ipcResponse),
 		closed:     make(chan struct{}),
 		events:     make(chan Event, eventBufferSize),
@@ -204,13 +213,20 @@ func finishAttach(conn net.Conn, sock, lock, queuePath string) *Player {
 	p := newConn(conn)
 	p.sock, p.lock, p.queuePath = sock, lock, queuePath
 	p.observeProps()
-	p.setTracks(p.reconcileTracks())
+	if ts, ok := p.reconcileTracks(); ok {
+		p.setTracks(ts)
+	}
 	return p
 }
 
 // spawnOrAttach claims the spawn lock and starts mpv, or — if another client is
-// already spawning — waits for the socket and attaches. A stale lock left by a
-// crashed daemon (no socket ever appears) is stolen once so we can recover.
+// already spawning — waits for the socket and attaches. The lock records the
+// daemon's pid: a lock whose recorded owner is dead (crashed daemon) is
+// reclaimed immediately instead of waiting out the connect budget, while a
+// lock with a live owner is never stolen — stealing it could spawn a second
+// daemon and orphan the first, unreachable, one. A lock with no readable pid
+// (the spawner crashed before recording it) is stolen once after the budget
+// elapses, as before.
 func spawnOrAttach(mpvPath string, o Options, sock, lock, queuePath string) (*Player, error) {
 	deadline := time.Now().Add(connectBudget)
 	stole := false
@@ -219,21 +235,71 @@ func spawnOrAttach(mpvPath string, o Options, sock, lock, queuePath string) (*Pl
 		if err == nil {
 			return spawnDetached(mpvPath, o, sock, lock, queuePath, lf)
 		}
-		// Another client holds the lock (spawning) — wait for its socket.
+		// Another client holds the lock (spawning) — try its socket.
 		if conn, derr := net.Dial("unix", sock); derr == nil {
 			return finishAttach(conn, sock, lock, queuePath), nil
+		}
+		if !stole && reclaimDeadLock(lock) {
+			stole = true
+			deadline = time.Now().Add(connectBudget)
+			continue
 		}
 		if time.Now().After(deadline) {
 			if stole {
 				return nil, fmt.Errorf("player: mpv did not start (stale lock %q)", lock)
 			}
-			// The lock holder vanished without exposing a socket: reclaim it.
+			if pid, ok := lockPid(lock); ok && pidAlive(pid) {
+				return nil, fmt.Errorf("player: spawn lock %q held by running mpv (pid %d) but its socket never appeared", lock, pid)
+			}
+			// The lock holder vanished before recording a pid: reclaim it once.
 			_ = os.Remove(lock)
 			stole = true
 			deadline = time.Now().Add(connectBudget)
 		}
 		time.Sleep(connectRetry)
 	}
+}
+
+// lockPid reads the daemon pid recorded in the spawn lock file. ok is false
+// when the file is missing, empty (the spawner has not written it yet), or
+// malformed.
+func lockPid(lock string) (int, bool) {
+	if lock == "" {
+		return 0, false
+	}
+	data, err := os.ReadFile(lock)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// pidAlive reports whether a process with the given pid exists. EPERM still
+// proves existence (we just may not signal it).
+func pidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+// reclaimDeadLock removes the spawn lock if the pid it records is no longer
+// alive (a crashed daemon). The lock is moved aside with an atomic rename
+// first so two clients racing to reclaim the same stale lock cannot both
+// "succeed" and spawn two daemons. It reports whether the lock was reclaimed.
+func reclaimDeadLock(lock string) bool {
+	pid, ok := lockPid(lock)
+	if !ok || pidAlive(pid) {
+		return false
+	}
+	stale := fmt.Sprintf("%s.stale.%d", lock, os.Getpid())
+	if err := os.Rename(lock, stale); err != nil {
+		return false
+	}
+	_ = os.Remove(stale)
+	return true
 }
 
 // spawnDetached starts mpv fully detached (setsid, stdio to /dev/null, the
@@ -324,11 +390,15 @@ func dialWithRetry(sock string, budget time.Duration) (net.Conn, error) {
 }
 
 // observeProps subscribes to every property we translate into Events. Failures
-// are best-effort: the connection is already proven.
+// are best-effort: the connection is already proven. playlist-playing-pos is
+// deliberately NOT observed: it emits a transient -1 between tracks on every
+// auto-advance (while the next entry loads), which consumers would mistake for
+// end-of-queue idle; playlist-pos moves directly from one index to the next
+// and only reports -1 when the player is truly idle.
 func (p *Player) observeProps() {
 	props := []string{
 		"time-pos", "duration", "pause", "volume", "mute",
-		"playlist-pos", "playlist-playing-pos",
+		"playlist-pos",
 	}
 	for i, prop := range props {
 		_, _ = p.command("observe_property", i+1, prop)
@@ -355,10 +425,18 @@ func (p *Player) TogglePause() error {
 	return err
 }
 
-// Stop stops playback. mpv's stop also clears the playlist.
+// Stop stops playback. mpv's stop also clears the playlist, so the in-memory
+// tracks mirror and the queue.json sidecar are reset to match — otherwise a
+// long-lived client would keep issuing index-based mutations against playlist
+// entries that no longer exist.
 func (p *Player) Stop() error {
-	_, err := p.command("stop")
-	return err
+	p.plMu.Lock()
+	defer p.plMu.Unlock()
+	if _, err := p.command("stop"); err != nil {
+		return err
+	}
+	p.setTracks(nil)
+	return p.persist(nil)
 }
 
 // Seek moves the playback position by offsetSec seconds (relative; negative
@@ -400,14 +478,32 @@ func (p *Player) Close() error {
 	return nil
 }
 
-// Quit terminates the daemon: it asks mpv to quit, detaches this client, and
-// removes the socket and lock files so the next New spawns a fresh daemon. Used
-// by the CLI -kill flag.
+// Quit terminates the daemon: it asks mpv to quit, detaches this client,
+// verifies the process actually exits — escalating to SIGTERM then SIGKILL
+// when the quit command was lost (e.g. a wedged mpv that stopped reading its
+// IPC socket) — and removes the socket and lock files so the next New spawns a
+// fresh daemon. Without the verification, an mpv that ignored quit would keep
+// playing with its socket already deleted, unreachable by any future client.
+// Used by the CLI -kill flag.
 func (p *Player) Quit() error {
+	// The spawning client knows the pid directly; an attached client reads back
+	// the pid the spawner recorded in the lock file.
+	pid := p.pid
+	if pid <= 0 {
+		pid, _ = lockPid(p.lock)
+	}
 	// Ask mpv to exit while the connection is still live (best effort).
 	_ = p.write(ipcRequest{Command: []any{"quit"}, RequestID: p.nextRequestID()})
 	// Detach our client side.
 	_ = p.Close()
+	// Confirm the daemon died; escalate if it did not.
+	if pid > 0 && !waitProcessExit(pid, p.quitBudget) {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		if !waitProcessExit(pid, p.quitBudget) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			_ = waitProcessExit(pid, p.quitBudget)
+		}
+	}
 	// Remove the daemon's on-disk artifacts.
 	var firstErr error
 	for _, f := range []string{p.sock, p.lock} {
@@ -419,6 +515,36 @@ func (p *Player) Quit() error {
 		}
 	}
 	return firstErr
+}
+
+// waitProcessExit polls until the process is gone or the budget elapses.
+func waitProcessExit(pid int, budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if processGone(pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(quitPollInterval)
+	}
+}
+
+// processGone reports whether pid no longer refers to a live process. A child
+// of this process is reaped via wait4(WNOHANG) — a dead-but-unreaped child is
+// a zombie that kill(pid, 0) would still report as alive; for non-children it
+// falls back to the kill(pid, 0) existence probe.
+func processGone(pid int) bool {
+	var ws syscall.WaitStatus
+	wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+	if wpid == pid {
+		return true // our child: reaped its exit status just now
+	}
+	if err == syscall.ECHILD {
+		return syscall.Kill(pid, 0) != nil
+	}
+	return false // still running (wpid == 0) or a transient wait error
 }
 
 // clampVolume bounds a volume percentage to mpv's accepted range.

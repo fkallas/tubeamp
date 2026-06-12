@@ -3,6 +3,7 @@ package player
 import (
 	"encoding/json"
 	"fmt"
+	"syscall"
 	"time"
 )
 
@@ -55,6 +56,15 @@ func (p *Player) readLoop() {
 		// and close events so the UI's listen loop observes mpv's death.
 		p.markClosed()
 		p.finish()
+		// Best-effort reap: if this client spawned the daemon and the daemon
+		// has died (the usual reason this loop exits without Close), collect
+		// the zombie so other processes' pid-liveness checks (stale-lock
+		// reclaim, Quit) see it as dead. WNOHANG leaves a live daemon (normal
+		// detach) untouched.
+		if p.pid > 0 {
+			var ws syscall.WaitStatus
+			_, _ = syscall.Wait4(p.pid, &ws, syscall.WNOHANG, nil)
+		}
 		close(p.readerDone)
 	}()
 
@@ -205,10 +215,13 @@ func mapEvent(r *ipcResponse) (Event, bool) {
 			if b, ok := boolData(r.Data); ok {
 				return Event{Kind: EvMute, Bool: b}, true
 			}
-		case "playlist-pos", "playlist-playing-pos":
-			// Both report the current playlist index; -1 means idle (end of
-			// queue or nothing loaded). mpv advances the playlist itself, so
-			// this is what drives the client's "now playing" index.
+		case "playlist-pos":
+			// The current playlist index; -1 means idle (end of queue or
+			// nothing loaded). mpv advances the playlist itself, so this is
+			// what drives the client's "now playing" index. Note that
+			// playlist-playing-pos is intentionally not mapped (or observed):
+			// it reports a transient -1 between tracks on every auto-advance,
+			// which would flash consumers into their idle state.
 			if n, ok := intData(r.Data); ok {
 				return Event{Kind: EvPlaylistPos, Int: n}, true
 			}

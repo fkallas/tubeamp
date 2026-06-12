@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -214,6 +215,11 @@ func TestEventMapping(t *testing.T) {
 		{"pause", `{"event":"property-change","id":3,"name":"pause","data":true}`, &Event{Kind: EvPause, Bool: true}},
 		{"volume", `{"event":"property-change","id":4,"name":"volume","data":73.5}`, &Event{Kind: EvVolume, Float: 73.5}},
 		{"mute", `{"event":"property-change","id":5,"name":"mute","data":true}`, &Event{Kind: EvMute, Bool: true}},
+		{"playlist-pos", `{"event":"property-change","id":6,"name":"playlist-pos","data":2}`, &Event{Kind: EvPlaylistPos, Int: 2}},
+		{"playlist-pos-idle", `{"event":"property-change","id":6,"name":"playlist-pos","data":-1}`, &Event{Kind: EvPlaylistPos, Int: -1}},
+		// playlist-playing-pos must NOT map: it reports a transient -1 between
+		// tracks on every auto-advance, which would flash consumers idle.
+		{"playing-pos-skip", `{"event":"property-change","id":7,"name":"playlist-playing-pos","data":-1}`, nil},
 		{"file-loaded", `{"event":"file-loaded"}`, &Event{Kind: EvFileLoaded}},
 		{"end-file-eof", `{"event":"end-file","reason":"eof"}`, &Event{Kind: EvTrackEnded}},
 		{"end-file-error", `{"event":"end-file","reason":"error","file_error":"loading failed"}`, &Event{Kind: EvError, Str: "loading failed"}},
@@ -605,6 +611,87 @@ func TestLoadEntryCommandForm(t *testing.T) {
 	}
 }
 
+// TestPlaylistReplaceAppendsThenJumps asserts PlaylistReplace clears via stop,
+// appends every entry while idle, and only then sets playlist-pos — so mpv
+// never transiently loads/plays entry 0 (wasting a yt-dlp resolve and emitting
+// a spurious playlist-pos=0 event) when start > 0.
+func TestPlaylistReplaceAppendsThenJumps(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	go f.serveRecord()
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	ts := []model.Track{
+		{VideoID: "a", Title: "A"},
+		{VideoID: "b", Title: "B"},
+		{VideoID: "c", Title: "C"},
+	}
+	if err := p.PlaylistReplace(ts, 2); err != nil {
+		t.Fatalf("PlaylistReplace: %v", err)
+	}
+
+	var seq []string
+	pos := -100
+	for _, rec := range f.cmdRecords() {
+		var name string
+		_ = json.Unmarshal(rec[0], &name)
+		switch name {
+		case "stop":
+			seq = append(seq, "stop")
+		case "loadfile":
+			var mode string
+			_ = json.Unmarshal(rec[2], &mode)
+			if mode != "append" {
+				t.Errorf("loadfile mode = %q, want append (replace would transiently play entry 0)", mode)
+			}
+			seq = append(seq, "loadfile")
+		case "set_property":
+			var prop string
+			_ = json.Unmarshal(rec[1], &prop)
+			if prop == "playlist-pos" {
+				_ = json.Unmarshal(rec[2], &pos)
+				seq = append(seq, "set-pos")
+			}
+		}
+	}
+	want := []string{"stop", "loadfile", "loadfile", "loadfile", "set-pos"}
+	if fmt.Sprint(seq) != fmt.Sprint(want) {
+		t.Fatalf("command order = %v, want %v", seq, want)
+	}
+	if pos != 2 {
+		t.Fatalf("playlist-pos set to %d, want 2", pos)
+	}
+}
+
+// TestStopResetsMirrorAndSidecar checks Stop matches what mpv's stop does to
+// the playlist (clears it): the in-memory mirror and queue.json must reset too,
+// or later index-based mutations would target entries that no longer exist.
+func TestStopResetsMirrorAndSidecar(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	go f.serveEcho()
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	if err := p.PlaylistReplace([]model.Track{{VideoID: "a", Title: "A"}}, 0); err != nil {
+		t.Fatalf("PlaylistReplace: %v", err)
+	}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got := p.getTracks(); len(got) != 0 {
+		t.Errorf("Stop left %d tracks in the mirror, want 0", len(got))
+	}
+	disk, err := readQueueFile(p.queuePath)
+	if err != nil {
+		t.Fatalf("readQueueFile: %v", err)
+	}
+	if len(disk) != 0 {
+		t.Errorf("Stop left %d tracks in the sidecar, want 0", len(disk))
+	}
+}
+
 // TestSnapshotUsesRichSidecar checks Snapshot reconciles the live playlist with
 // queue.json (matching counts => rich metadata wins) and reads the properties.
 func TestSnapshotUsesRichSidecar(t *testing.T) {
@@ -663,6 +750,139 @@ func TestSnapshotDegradesWithoutSidecar(t *testing.T) {
 	}
 	if len(s.Tracks) != 1 || s.Tracks[0].Title != "Zee" || s.Tracks[0].VideoID != "zz" {
 		t.Errorf("degraded snapshot = %+v, want one track Zee/zz from the live playlist", s.Tracks)
+	}
+}
+
+// TestSnapshotMatchesSidecarPerEntry asserts reconciliation cross-checks each
+// sidecar track against the live entry's filename instead of trusting a bare
+// length match: a same-length sidecar diverging from the live playlist (another
+// client mutated the shared queue) must not report metadata for the wrong
+// track, while still-matching entries keep their rich metadata.
+func TestSnapshotMatchesSidecarPerEntry(t *testing.T) {
+	f, conn := newFakeMPV(t)
+	props := map[string]string{
+		"playlist": `[{"filename":"https://music.youtube.com/watch?v=a","title":"A"},` +
+			`{"filename":"https://music.youtube.com/watch?v=x","title":"X"}]`,
+		"playlist-pos": "0",
+	}
+	go f.serveProps(props)
+	p := newConn(conn)
+	p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+	defer p.Close()
+
+	// Same length as the live playlist, but only entry 0 still matches it.
+	if err := p.persist([]model.Track{
+		{VideoID: "a", Title: "Alpha", Artists: []string{"AA"}},
+		{VideoID: "b", Title: "Beta"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := p.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(s.Tracks) != 2 {
+		t.Fatalf("snapshot tracks = %d, want 2", len(s.Tracks))
+	}
+	if s.Tracks[0].Title != "Alpha" {
+		t.Errorf("matching entry lost rich metadata: %+v", s.Tracks[0])
+	}
+	if s.Tracks[1].Title != "X" || s.Tracks[1].VideoID != "x" {
+		t.Errorf("mismatched entry = %+v, want it degraded to the live playlist data (X/x)", s.Tracks[1])
+	}
+}
+
+// TestLockPidParsing covers the lock-file pid reader: missing, empty, and
+// malformed files yield no pid; a recorded pid round-trips.
+func TestLockPidParsing(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "l")
+	if _, ok := lockPid(""); ok {
+		t.Error("empty path should yield no pid")
+	}
+	if _, ok := lockPid(lock); ok {
+		t.Error("missing lock file should yield no pid")
+	}
+	for _, content := range []string{"", "\n", "garbage", "-4"} {
+		if err := os.WriteFile(lock, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := lockPid(lock); ok {
+			t.Errorf("content %q should yield no pid", content)
+		}
+	}
+	if err := os.WriteFile(lock, []byte("1234\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pid, ok := lockPid(lock); !ok || pid != 1234 {
+		t.Errorf("lockPid = %d, %v; want 1234, true", pid, ok)
+	}
+}
+
+// TestReclaimDeadLock verifies the stale-lock fast path: a lock recording a
+// dead pid is reclaimed immediately, while a lock held by a live process (or
+// one with no recorded pid) is never stolen.
+func TestReclaimDeadLock(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "l")
+
+	// Live owner (this test process) must never be reclaimed.
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimDeadLock(lock) {
+		t.Fatal("reclaimed a lock held by a live process")
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("live lock was removed: %v", err)
+	}
+
+	// No recorded pid: not provably dead, so not reclaimable by the fast path.
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimDeadLock(lock) {
+		t.Fatal("reclaimed a lock with no recorded pid")
+	}
+
+	// Dead owner: run a short-lived child to completion so its pid is
+	// definitely dead (and reaped).
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("cannot run true: %v", err)
+	}
+	if err := os.WriteFile(lock, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !reclaimDeadLock(lock) {
+		t.Fatal("did not reclaim the lock of a dead process")
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("reclaimed lock still present: stat err = %v", err)
+	}
+}
+
+// TestQuitKillsUnresponsiveDaemon verifies Quit does not just assume the quit
+// command worked: with an IPC peer that never acts on it, Quit must verify the
+// recorded pid exits and escalate to signals until it does.
+func TestQuitKillsUnresponsiveDaemon(t *testing.T) {
+	_, conn := newFakeMPV(t) // never replies; the quit write is best-effort
+	p := newConn(conn)
+	p.quitBudget = 100 * time.Millisecond
+
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	_ = cmd.Process.Release()
+	p.pid = pid
+
+	if err := p.Quit(); err != nil {
+		t.Fatalf("Quit: %v", err)
+	}
+	if syscall.Kill(pid, 0) == nil {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatal("daemon process still alive after Quit")
 	}
 }
 

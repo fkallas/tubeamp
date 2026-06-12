@@ -193,7 +193,9 @@ and crossfeeds without re-initialising the audio chain when codecs match.
 The socket is fixed at `config.DataDir()/mpv.sock`. `New` first tries to ATTACH
 to an existing socket (connect OK → no spawn); otherwise it SPAWNS, guarded by an
 `O_CREATE|O_EXCL` lock file (`<sock>.lock`) plus an attach-retry loop so two
-concurrent clients never start two daemons. The mpv playlist **is** the queue;
+concurrent clients never start two daemons. The lock records the daemon's pid:
+a lock whose owner is dead (crashed daemon) is reclaimed immediately; a lock
+with a live owner is never stolen. The mpv playlist **is** the queue;
 the ordered, richly-typed track list is mirrored to `config.DataDir()/queue.json`
 (atomic temp+rename) on every mutation so a re-attaching client can rebuild full
 metadata (mpv itself only remembers titles for entries it has already played).
@@ -245,14 +247,19 @@ func New(o Options) (*Player, error)   // attach-or-spawn; AttachOnly => ErrNotR
 func (p *Player) Events() <-chan Event // buffered (~64); sender drops oldest-style (non-blocking) rather than stall
 func (p *Player) Load(url string) error // loadfile <url> replace (single-file; does not touch the sidecar)
 func (p *Player) TogglePause() error
-func (p *Player) Stop() error                  // mpv's stop also clears the playlist
+func (p *Player) Stop() error                  // mpv's stop also clears the playlist; the tracks
+                                               // mirror and queue.json sidecar are reset to match
 func (p *Player) Seek(offsetSec float64) error // relative
 func (p *Player) SetVolume(pct int) error      // clamp 0..120
 func (p *Player) ToggleMute() error
 
 // Playlist-backed queue. Each entry loads via ["loadfile", url, mode, -1, {force-media-title:<title>}]
 // (mpv >= 0.38 form) so bare mpv consumers see names. mpv auto-advances; the
-// current index is reported via observe_property playlist-pos / playlist-playing-pos.
+// current index is reported via observe_property playlist-pos (-1 only when truly
+// idle; playlist-playing-pos is deliberately NOT observed — it emits a transient
+// -1 between tracks on every auto-advance). PlaylistReplace stops (clearing the
+// old playlist), appends all entries while idle, then sets playlist-pos=start,
+// so entry 0 is never transiently loaded/reported when start > 0.
 func (p *Player) PlaylistReplace(ts []model.Track, start int) error
 func (p *Player) PlaylistAppend(ts ...model.Track) error
 func (p *Player) PlaylistRemove(i int) error
@@ -262,12 +269,14 @@ func (p *Player) Next() error                  // playlist-next weak (no-op at e
 func (p *Player) Prev() error                  // playlist-prev weak (no-op at start)
 func (p *Player) PlaylistClear() error
 
-func (p *Player) Snapshot() (Snapshot, error)  // queue.json reconciled with the live playlist + transport props;
-                                               // missing/corrupt queue.json degrades to titles from the mpv playlist
+func (p *Player) Snapshot() (Snapshot, error)  // queue.json reconciled entry-by-entry (URL match) with the live
+                                               // playlist + transport props; mismatched/missing sidecar entries
+                                               // degrade to titles from the mpv playlist
 
 func (p *Player) Close() error // DETACH: stop goroutines, fail pending, close Events, close conn — mpv, socket
                                // and playback are left untouched (this is what makes playback persist). Idempotent.
-func (p *Player) Quit() error  // terminate the daemon: send mpv quit, detach, remove socket + lock files (-kill)
+func (p *Player) Quit() error  // terminate the daemon: send mpv quit, detach, verify the process exits
+                               // (escalating to SIGTERM/SIGKILL), remove socket + lock files (-kill)
 ```
 
 ## internal/ytm (+ internal/ytm/parse)

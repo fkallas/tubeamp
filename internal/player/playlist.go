@@ -55,25 +55,27 @@ func (p *Player) loadEntry(t model.Track, mode string) error {
 }
 
 // PlaylistReplace replaces the entire playlist with ts and begins playing the
-// entry at start (clamped). An empty ts clears the playlist. Persists the sidecar.
+// entry at start (clamped). An empty ts clears the playlist. The old playlist
+// is cleared with stop, the new entries are appended while idle, and only then
+// is playlist-pos set — so mpv never transiently loads entry 0 (resolving it
+// via yt-dlp for nothing) or reports playlist-pos=0 when start > 0. Persists
+// the sidecar.
 func (p *Player) PlaylistReplace(ts []model.Track, start int) error {
 	p.plMu.Lock()
 	defer p.plMu.Unlock()
 
+	// stop clears the current playlist and idles; the appends below do not
+	// start playback on their own.
+	if _, err := p.command("stop"); err != nil {
+		return err
+	}
 	if len(ts) == 0 {
-		if _, err := p.command("stop"); err != nil {
-			return err
-		}
 		p.setTracks(nil)
 		return p.persist(nil)
 	}
 
-	for i, t := range ts {
-		mode := "append"
-		if i == 0 {
-			mode = "replace" // clears the old playlist and starts at index 0
-		}
-		if err := p.loadEntry(t, mode); err != nil {
+	for _, t := range ts {
+		if err := p.loadEntry(t, "append"); err != nil {
 			return err
 		}
 	}
@@ -83,10 +85,9 @@ func (p *Player) PlaylistReplace(ts []model.Track, start int) error {
 	if start >= len(ts) {
 		start = len(ts) - 1
 	}
-	if start != 0 {
-		if _, err := p.command("set_property", "playlist-pos", start); err != nil {
-			return err
-		}
+	// Setting playlist-pos on the idle player starts playback at start directly.
+	if _, err := p.command("set_property", "playlist-pos", start); err != nil {
+		return err
 	}
 	cp := append([]model.Track(nil), ts...)
 	p.setTracks(cp)
@@ -100,12 +101,15 @@ func (p *Player) PlaylistAppend(ts ...model.Track) error {
 	}
 	p.plMu.Lock()
 	defer p.plMu.Unlock()
+	// Re-sync with the live playlist first so mutations made by another
+	// attached client since our last sync are not clobbered when we persist.
+	base := p.syncedTracks()
 	for _, t := range ts {
 		if err := p.loadEntry(t, "append"); err != nil {
 			return err
 		}
 	}
-	cur := append(p.getTracks(), ts...)
+	cur := append(append([]model.Track(nil), base...), ts...)
 	p.setTracks(cur)
 	return p.persist(cur)
 }
@@ -115,7 +119,7 @@ func (p *Player) PlaylistAppend(ts ...model.Track) error {
 func (p *Player) PlaylistRemove(i int) error {
 	p.plMu.Lock()
 	defer p.plMu.Unlock()
-	cur := p.getTracks()
+	cur := p.syncedTracks()
 	if i < 0 || i >= len(cur) {
 		return nil
 	}
@@ -132,7 +136,7 @@ func (p *Player) PlaylistRemove(i int) error {
 func (p *Player) PlaylistMove(i, j int) error {
 	p.plMu.Lock()
 	defer p.plMu.Unlock()
-	cur := p.getTracks()
+	cur := p.syncedTracks()
 	if i < 0 || i >= len(cur) || j < 0 || j >= len(cur) || i == j {
 		return nil
 	}
@@ -168,15 +172,10 @@ func (p *Player) Prev() error {
 	return err
 }
 
-// PlaylistClear empties the playlist and stops playback. Persists the sidecar.
+// PlaylistClear empties the playlist and stops playback. Identical to Stop —
+// mpv's stop already clears the playlist, and both reset the mirror + sidecar.
 func (p *Player) PlaylistClear() error {
-	p.plMu.Lock()
-	defer p.plMu.Unlock()
-	if _, err := p.command("stop"); err != nil {
-		return err
-	}
-	p.setTracks(nil)
-	return p.persist(nil)
+	return p.Stop()
 }
 
 // moveTrack returns ts with the element at i relocated to index j using mpv's
@@ -218,9 +217,15 @@ func (p *Player) Snapshot() (Snapshot, error) {
 	defer p.plMu.Unlock()
 
 	s := Snapshot{PlaylistPos: -1}
-	s.Tracks = p.reconcileTracks()
-	// Keep the in-memory model in sync so later index-based mutations are valid.
-	p.setTracks(append([]model.Track(nil), s.Tracks...))
+	if ts, ok := p.reconcileTracks(); ok {
+		s.Tracks = ts
+		// Keep the in-memory model in sync so later index-based mutations are valid.
+		p.setTracks(append([]model.Track(nil), ts...))
+	} else {
+		// Live playlist unreadable: report this client's mirror rather than
+		// pretending the queue is empty.
+		s.Tracks = p.getTracks()
+	}
 
 	if raw, err := p.getProp("playlist-pos"); err == nil {
 		if n, ok := intData(raw); ok {
@@ -270,34 +275,56 @@ type playlistEntry struct {
 	Title    string `json:"title"`
 }
 
-// livePlaylist reads mpv's current playlist.
-func (p *Player) livePlaylist() []playlistEntry {
+// livePlaylist reads mpv's current playlist. ok is false when the property
+// cannot be read or parsed — callers must not mistake that for an empty
+// playlist.
+func (p *Player) livePlaylist() ([]playlistEntry, bool) {
 	raw, err := p.getProp("playlist")
 	if err != nil || len(raw) == 0 {
-		return nil
+		return nil, false
 	}
 	var entries []playlistEntry
 	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil
+		return nil, false
 	}
-	return entries
+	return entries, true
 }
 
-// reconcileTracks merges the sidecar queue with the live mpv playlist. When the
-// sidecar count matches the live entry count we trust its rich metadata;
-// otherwise (missing/corrupt/out-of-sync sidecar) we rebuild degraded tracks
-// from the playlist entries so the queue never crashes or goes blank.
-func (p *Player) reconcileTracks() []model.Track {
-	live := p.livePlaylist()
-	disk, derr := readQueueFile(p.queuePath)
-	if derr == nil && len(disk) == len(live) && len(live) > 0 {
-		return disk
+// reconcileTracks merges the sidecar queue with the live mpv playlist entry by
+// entry: a live entry whose filename matches the URL we would load the
+// same-index sidecar track with keeps the sidecar's rich metadata; any other
+// entry (another attached client mutated the shared playlist; missing or
+// corrupt sidecar) degrades to a bare track built from the live entry.
+// Matching on identity — not just on length — means rich metadata is never
+// reported for the wrong track. ok is false when the live playlist itself
+// could not be read.
+func (p *Player) reconcileTracks() ([]model.Track, bool) {
+	live, ok := p.livePlaylist()
+	if !ok {
+		return nil, false
 	}
+	disk, derr := readQueueFile(p.queuePath)
 	out := make([]model.Track, len(live))
 	for i, e := range live {
-		out[i] = trackFromEntry(e)
+		if derr == nil && i < len(disk) && p.trackURL(disk[i]) == e.Filename {
+			out[i] = disk[i]
+		} else {
+			out[i] = trackFromEntry(e)
+		}
 	}
-	return out
+	return out, true
+}
+
+// syncedTracks returns the freshest available queue model: the live playlist
+// reconciled with the sidecar when readable, otherwise this client's own
+// in-memory mirror. Mutations base themselves on it so changes made by other
+// attached clients since our last sync are not clobbered when we persist.
+func (p *Player) syncedTracks() []model.Track {
+	if ts, ok := p.reconcileTracks(); ok {
+		p.setTracks(ts)
+		return ts
+	}
+	return p.getTracks()
 }
 
 // trackFromEntry builds a degraded Track from a bare mpv playlist entry.
