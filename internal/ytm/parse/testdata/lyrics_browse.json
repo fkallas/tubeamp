@@ -1,0 +1,26 @@
+{
+  "contents": {
+    "sectionListRenderer": {
+      "contents": [
+        {
+          "musicDescriptionShelfRenderer": {
+            "description": {
+              "runs": [
+                {
+                  "text": "I been tryin' to do it right\nI been livin' a lonely life\nI been sleepin' here instead\nI been sleepin' in my bed"
+                }
+              ]
+            },
+            "footer": {
+              "runs": [
+                {
+                  "text": "Source: Musixmatch"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

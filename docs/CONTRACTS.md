@@ -377,6 +377,13 @@ func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, e
                                                   // account/account_menu; signedIn = activeAccountHeaderRenderer
                                                   // present, name from its accountName runs. Logged-out menu =>
                                                   // ("", false, nil) (a result, not an error). HTTP errors => err.
+func (c *Client) Lyrics(ctx context.Context, videoID string) (string, error)
+                                                  // plain-lyrics fallback (used when LRCLIB has none). Two-call
+                                                  // InnerTube flow: POST next {videoId} -> lyrics-tab browseId
+                                                  // (parse.LyricsBrowseID) -> POST browse {browseId} ->
+                                                  // description text (parse.LyricsText). ErrNoLyrics when absent.
+
+var ErrNoLyrics = parse.ErrNoLyrics // aliased so errors.Is works on ytm.Lyrics results
 
 // package ytm/parse — ALL response JSON parsing lives here, fixture-tested.
 
@@ -394,6 +401,15 @@ func SearchTracks(raw []byte) ([]model.Track, error)                  // thin wr
 func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums search shelf + top-result card
 func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
 func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account/account_menu menu (both shapes)
+
+// Lyrics (plain fallback). LyricsBrowseID walks a `next` watch response for the
+// lyrics-tab browseId (an "MPLYt…" id; matched by tab title "Lyrics" OR the
+// MPLYt prefix). LyricsText pulls the musicDescriptionShelfRenderer.description
+// (runs or simpleText). Both return ErrNoLyrics (typed) when absent; only
+// malformed JSON errors. Defensive, fixture-tested (lyrics_next.json + lyrics_browse.json).
+func LyricsBrowseID(raw []byte) (string, error)
+func LyricsText(raw []byte) (string, error)
+var ErrNoLyrics = errors.New("ytm: no lyrics") // no lyrics tab / no description shelf
 
 var ErrNotSignedIn = errors.New("ytm: not signed in") // logged-out page. Detected positively via the
                                                   // responseContext "logged_in" marker ("0" => logged out;
@@ -433,7 +449,58 @@ shape (with `activeAccountHeaderRenderer`); `account_logged_out.json`,
 trimmed live anonymous captures of the logged-out shapes, cross-checked by the
 credential-free anonymous live tests (gated on `TUBEAMP_LIVE=1`).
 `library_playlists.json` / `playlist_tracks.json` are handcrafted (grid +
-playlist-shelf), each with one malformed item skipped.
+playlist-shelf), each with one malformed item skipped. `lyrics_next.json` /
+`lyrics_browse.json` are a handcrafted next+browse pair exercising the two-call
+lyrics flow (a "Lyrics" tab with an MPLYt browseId, then a description shelf).
+
+## internal/lyrics
+
+Fetching and parsing of song lyrics — synced (LRC, from LRCLIB) and plain. Pure
+parsing (`ParseLRC`/`CurrentLine`) is table-tested; `FetchLRCLIB` is tested
+against an `httptest` server (the HTTP client + base URL are injectable package
+vars, never the real network). LRCLIB is plain HTTP+JSON over `net/http` — no
+new dependency; the LRC body is parsed here. A YouTube Music plain-text fallback
+lives in `ytm.Client.Lyrics`.
+
+```go
+const (
+    SourceLRCLIB  = "lrclib"  // synced/plain lyrics from lrclib.net
+    SourceYTMusic = "ytmusic" // plain lyrics from YouTube Music's InnerTube API
+)
+
+type Line struct { At time.Duration; Text string } // At = start offset; Text "" for a blank cue
+
+// Lyrics is a resolved result. Synced=true when At timestamps are present (LRC);
+// Lines then holds the timed lines and Plain may still hold the unsynced text.
+// For plain results Synced=false, Lines empty, Plain holds the text. Source is
+// SourceLRCLIB/SourceYTMusic or "".
+type Lyrics struct { Lines []Line; Synced bool; Plain string; Source string }
+
+// ParseLRC parses an LRC body into timed lines, sorted by ascending At.
+// Understands "[mm:ss.xx]" and "[mm:ss]" (1-3 fractional digits); a single line
+// may carry several leading timestamps (one Line emitted per timestamp).
+// Metadata tags ([ar:]/[ti:]/[al:]/[length:]/[by:]/…) and timestamp-less lines
+// are ignored; malformed timestamps skipped. [offset:NNN] (ms) is honoured —
+// per LRC convention a positive offset shifts lines EARLIER (At reduced),
+// negative later; negative results clamp to 0. Pure.
+func ParseLRC(s string) []Line
+
+// CurrentLine returns the index of the last line with At <= pos, or -1 before
+// the first line / for empty input. Binary search; assumes lines sorted by At.
+func CurrentLine(lines []Line, pos time.Duration) int
+
+var ErrNoLyrics = errors.New("lyrics: no lyrics found") // typed "nothing found"; match with errors.Is
+
+// FetchLRCLIB looks up lyrics on LRCLIB. GET /api/get?artist_name=&track_name=
+// &album_name=&duration=<secs> with UA "tubeamp (https://github.com/fkallas/tubeamp)".
+// 200 => prefer syncedLyrics (ParseLRC, Synced=true) else plainLyrics. 404 =>
+// GET /api/search?q=<artist title>, first hit with synced (else first hit's
+// plain). Nothing usable => ErrNoLyrics; network/HTTP/decode => wrapped error.
+// io.LimitReader (~1MB); ctx bounds both requests.
+func FetchLRCLIB(ctx context.Context, artist, title, album string, dur time.Duration) (Lyrics, error)
+
+// httpClient (a Doer) and baseURL are unexported package vars, overridable in tests.
+```
 
 ## internal/auth
 

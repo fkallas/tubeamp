@@ -248,6 +248,60 @@ func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []
 	return album, tracks, nil
 }
 
+// ErrNoLyrics reports that YouTube Music has no lyrics for a video (no lyrics
+// tab on the watch page, or an empty lyrics browse). Aliased from parse so
+// errors.Is works on ytm.Client.Lyrics results.
+var ErrNoLyrics = parse.ErrNoLyrics
+
+// Lyrics fetches the plain (unsynced) lyrics YouTube Music has for a video, used
+// as a fallback when LRCLIB has no synced lyrics. It is a two-call InnerTube
+// flow: POST next {videoId} to locate the lyrics-browse tab (parse.LyricsBrowseID),
+// then POST browse {browseId} and extract the description text
+// (parse.LyricsText). Returns ErrNoLyrics (matchable with errors.Is) when the
+// track has no lyrics; transport/HTTP errors are returned wrapped.
+func (c *Client) Lyrics(ctx context.Context, videoID string) (string, error) {
+	nextPayload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"videoId": videoID,
+	}
+
+	raw, err := c.post(ctx, "next", nextPayload)
+	if err != nil {
+		return "", fmt.Errorf("ytm.Lyrics: %w", err)
+	}
+	browseID, err := parse.LyricsBrowseID(raw)
+	if err != nil {
+		return "", fmt.Errorf("ytm.Lyrics: %w", err)
+	}
+
+	browsePayload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"browseId": browseID,
+	}
+
+	raw, err = c.post(ctx, "browse", browsePayload)
+	if err != nil {
+		return "", fmt.Errorf("ytm.Lyrics: %w", err)
+	}
+	text, err := parse.LyricsText(raw)
+	if err != nil {
+		return "", fmt.Errorf("ytm.Lyrics: %w", err)
+	}
+	return text, nil
+}
+
 // AccountInfo queries the InnerTube account menu (the account/account_menu
 // endpoint) and reports the signed-in account. signedIn is true when YouTube
 // returns the signed-in menu — an activeAccountHeaderRenderer — and name is its

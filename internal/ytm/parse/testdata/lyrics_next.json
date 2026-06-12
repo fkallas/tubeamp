@@ -1,0 +1,39 @@
+{
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            {
+              "tabRenderer": {
+                "title": "Up next",
+                "selected": true,
+                "endpoint": {}
+              }
+            },
+            {
+              "tabRenderer": {
+                "title": "Lyrics",
+                "endpoint": {
+                  "browseEndpoint": {
+                    "browseId": "MPLYt_abc123def456"
+                  }
+                }
+              }
+            },
+            {
+              "tabRenderer": {
+                "title": "Related",
+                "endpoint": {
+                  "browseEndpoint": {
+                    "browseId": "MPTRt_relatedxyz"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -27,6 +27,10 @@ a playlist loads its tracks (first page, ~100 tracks each; radio not yet). An
 **anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
 remaining Library sections (Albums/Artists/Songs/History) are still mock.
 
+Time-synced lyrics are plumbed in as a building block (`internal/lyrics`): LRC
+fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube Music
+plain-text fallback (`ytm.Client.Lyrics`). Not yet surfaced in the UI.
+
 Note: the InnerTube **album-search vertical** ranks oddly — it surfaces obscure
 self-distributed releases over the major-label catalog. This is **not** an auth
 problem (an authenticated session returns the same ranking; ytmusicapi behaves
