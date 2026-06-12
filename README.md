@@ -19,8 +19,9 @@ can wire keybindings and status bars to it.
 
 Early scaffold. The TUI shell, theming, persistent/detached mpv playback (with a
 playlist-backed queue, CLI control, and gapless prefetch), and the pixel-art
-renderer work end to end with mock library data; the YT Music API client is a
-skeleton (unauthenticated search wired, library/playlists/radio not yet).
+renderer work end to end with mock library data; the YT Music API client wires
+unauthenticated song/album search and album browsing into the search view, with
+library/playlists/radio not yet.
 
 ## Requirements
 
@@ -41,7 +42,12 @@ go build ./cmd/tubeamp
 
 Keys: `1/2/3/4` jump to a panel, `↑/↓` move, `enter` plays,
 `space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `+/-` volume, `/` search,
-`T` theme picker, `?` help, `q` quit (playback keeps running in the background).
+`o` open the selected album (album rows in search results), `T` theme picker,
+`?` help, `q` quit (playback keeps running in the background).
+
+Search returns two sections — Songs and Albums. On an album row, `enter` plays the
+whole album and `o` opens an album view (cover, metadata, track list) where `enter`
+plays the album from the highlighted track and `esc` returns to the results.
 
 ## Gapless playback
 

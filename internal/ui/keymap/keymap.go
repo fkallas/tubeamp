@@ -32,6 +32,7 @@ type KeyMap struct {
 	// Queue / main-view actions.
 	Append     key.Binding
 	InsertNext key.Binding
+	Open       key.Binding
 	Remove     key.Binding
 	MoveUp     key.Binding
 	MoveDown   key.Binding
@@ -70,6 +71,7 @@ func Default() KeyMap {
 
 		Append:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "append to queue")),
 		InsertNext: key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "play next")),
+		Open:       key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open album")),
 		Remove:     key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove")),
 		MoveUp:     key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "move up")),
 		MoveDown:   key.NewBinding(key.WithKeys("J"), key.WithHelp("J", "move down")),
@@ -89,7 +91,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Focus1, k.Focus2, k.Focus3, k.Focus4, k.Up, k.Down, k.Top, k.Bottom},
 		{k.Enter, k.Space, k.Next, k.Prev, k.SeekBack, k.SeekFwd, k.VolUp, k.VolDown, k.Mute},
-		{k.Append, k.InsertNext, k.Remove, k.MoveUp, k.MoveDown, k.ClearQueue},
+		{k.Append, k.InsertNext, k.Open, k.Remove, k.MoveUp, k.MoveDown, k.ClearQueue},
 		{k.Search, k.Theme, k.Help, k.Quit, k.Esc},
 	}
 }

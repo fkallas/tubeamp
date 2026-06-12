@@ -362,6 +362,17 @@ flushed right. The ALBUM column is dropped when the main view is narrower than
 TITLE > ARTIST > ALBUM. Queue rows append a Muted " — <album>" suffix only when
 the Queue panel is ~34 cols or wider; otherwise the row is unchanged.
 
+The main view is a stack of frames; a frame is one of three kinds:
+- **track list** (library/playlist/single search-song play) — the table above.
+- **search results** (`panels.SearchView`) — a Muted "Songs" header + the track
+  table, then a Muted "Albums" header + album rows `▤ <Title> — <Artists> (<Year>)`.
+  A single selection cursor runs through both sections (songs first, then albums)
+  so `↑`/`↓` move through them seamlessly.
+- **album view** (`panels.AlbumView`) — a header row with a large
+  `panels.AlbumCoverCols`×`panels.AlbumCoverRows` (16×8) pixel-art cover on the
+  left and the album title (Accent), artists, year + track count (Muted) to its
+  right; below, the album's track list (number, title, duration — no album column).
+
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 
 Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main
@@ -372,8 +383,18 @@ overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 Per panel: `↑`/`↓` arrows move selection; `g/G` top/bottom; `enter` activates.
 Library/Playlists `enter` → load (mock) tracks into main view. Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
-`A` insert-next. Queue: `enter` jump-to-track, `d` remove, `J/K` move item,
-`c` clear.
+`A` insert-next; `o` open album (album rows only). Queue: `enter` jump-to-track,
+`d` remove, `J/K` move item, `c` clear.
+
+Album flows (main view): a search produces two sections — Songs then Albums (see
+below). On an **album row**: `enter` fetches `GetAlbum` then `PlaylistReplace`s the
+queue with the album from track 0 and plays ("Playing <album>" toast); `o` fetches
+`GetAlbum` then pushes a dedicated **album view** onto the main-view stack. In the
+**album view**: `↑`/`↓` move; `enter` = `PlaylistReplace(albumTracks, selected)` +
+play (the whole album, starting at the selected track); `esc` pops back to the
+search results with the cursor preserved. GetAlbum and the album-cover download
+each carry a generation guard (like the search guard) so stale results are dropped;
+nil-player / nil-client are handled with status-line notices, never a crash.
 
 ### Required patterns
 
@@ -406,8 +427,13 @@ func listenPlayer(p *player.Player) tea.Cmd {
 - Theme picker overlay: lists `theme.List(config.ThemesDir())`, live-previews
   on cursor move, `enter` = keep + `cfg.Save()` (via Cmd), `esc` = revert.
 - Search overlay: `bubbles/textinput`; on enter, if ytm client non-nil run
-  `Search` Cmd (5s timeout ctx) → results become main view content; on error
-  or nil client, status-line message.
+  `Search` and `SearchAlbums` Cmds concurrently (`tea.Batch`, both 5s timeout
+  ctx) → results become a search-results frame (Songs + Albums sections); render
+  whichever returns first, fill the other section on arrival; on error or nil
+  client, status-line message.
+- Album cover (album view): fetch via Cmd from `RewriteThumbURL(thumb, 64)`,
+  render 16×8 with theme palette options, `Placeholder` while loading, cache by
+  browseID+theme (mirrors the player-bar art caching).
 - Status line doubles as transient error/info toast (e.g. "mpv not found —
   playback disabled").
 - Use `lipgloss.Width`/`Height` for layout math on styled strings, never `len()`.

@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
+	"github.com/fkallas/tubeamp/internal/model"
 	"github.com/fkallas/tubeamp/internal/theme"
 )
 
@@ -287,5 +289,86 @@ func TestAlbumColumnHiddenAtNarrowWidth(t *testing.T) {
 	}
 	if !strings.Contains(v, "Smells Like Teen Spirit") {
 		t.Errorf("View(80×24) dropped the track row; \"Smells Like Teen Spirit\" missing")
+	}
+}
+
+// fakeAlbum returns a deterministic album + tracks for injecting into the model.
+func fakeAlbum() (model.Album, []model.Track) {
+	a := model.Album{
+		BrowseID: "MPREb_fakeAlbum",
+		Title:    "Test Album XYZ",
+		Artists:  []string{"Fake Artist"},
+		Year:     "2021",
+	}
+	ts := []model.Track{
+		{VideoID: "fakevid1", Title: "Test Track One", Artists: []string{"Fake Artist"}, Album: "Test Album XYZ", Duration: 3 * time.Minute},
+		{VideoID: "fakevid2", Title: "Test Track Two", Artists: []string{"Fake Artist"}, Album: "Test Album XYZ", Duration: 4 * time.Minute},
+	}
+	return a, ts
+}
+
+// TestAlbumViewShowsHeaderTracksAndPlaceholderArt injects an album view frame and
+// asserts the rendered view shows the album title, year, a track row, and (since
+// no cover has loaded) the placeholder pixel-art cover.
+func TestAlbumViewShowsHeaderTracksAndPlaceholderArt(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+	m.pushAlbum(a, ts)
+	m.setFocus(focusMain)
+
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"Test Album XYZ", "2021", "Test Track One"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("album view missing %q in:\n%s", want, v)
+		}
+	}
+	// art.Placeholder/Render emit the UPPER HALF BLOCK; the player bar art is
+	// blank (nothing playing), so the only ▀ comes from the album cover.
+	if !strings.Contains(v, "▀") {
+		t.Errorf("album view missing the placeholder cover art (no ▀ half-block)")
+	}
+}
+
+// TestAlbumViewEnterWithNilPlayerToasts confirms enter in the album view (play
+// from the selected track) does not panic when the player is nil: it sets the
+// disabled notice and still populates the queue with the whole album.
+func TestAlbumViewEnterWithNilPlayerToasts(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+	m.pushAlbum(a, ts)
+	m.setFocus(focusMain)
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.status == "" {
+		t.Errorf("enter in album view with nil player set no status")
+	}
+	if !strings.Contains(m.View(), "mpv not found") {
+		t.Errorf("album-view enter notice not shown; status = %q", m.status)
+	}
+	if m.q.Len() != len(ts) {
+		t.Errorf("album-view enter should queue all %d tracks, got %d", len(ts), m.q.Len())
+	}
+}
+
+// TestSearchResultsRenderBothSections delivers fake songs and album results (which
+// arrive as separate messages) and asserts both sections render in the main view.
+func TestSearchResultsRenderBothSections(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+
+	m.searchGen = 7
+	m = send(m, searchResultMsg{gen: 7, query: "test", tracks: ts})
+	m = send(m, albumSearchMsg{gen: 7, query: "test", albums: []model.Album{a}})
+
+	if m.FocusedPanel() != "Main" {
+		t.Fatalf("search results did not focus the main view; focus = %q", m.FocusedPanel())
+	}
+	v := ansi.Strip(m.View())
+	// "Songs"/"Albums" also appear in the library panel, so assert on distinctive
+	// content: a song row, the album-row glyph, and the album result title.
+	for _, want := range []string{"Test Track One", "▤", "Test Album XYZ"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("search results view missing %q in:\n%s", want, v)
+		}
 	}
 }

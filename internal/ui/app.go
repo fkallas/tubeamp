@@ -54,12 +54,31 @@ const (
 	overlayTheme
 )
 
-// mainContent is one frame of the main-view stack: a titled track list with its
-// own selection cursor. esc pops the stack (e.g. search results -> previous).
+// mainKind tags what a main-view stack frame holds, which selects how it renders
+// and how its selection cursor maps to items.
+type mainKind int
+
+const (
+	mainTracks mainKind = iota // a plain track list (library, playlist, etc.)
+	mainSearch                 // search results: a Songs section then an Albums section
+	mainAlbum                  // an album detail view (cover + header + track list)
+)
+
+// mainContent is one frame of the main-view stack: a titled list with its own
+// selection cursor. esc pops the stack (e.g. search results -> previous). For a
+// mainSearch frame the cursor addresses tracks first then albums; for a
+// mainAlbum frame it addresses the album's tracks.
 type mainContent struct {
+	kind   mainKind
 	title  string
 	tracks []model.Track
+	albums []model.Album // mainSearch: the album results section
+	album  model.Album   // mainAlbum: the album being viewed
 	cursor int
+	// searchGen ties a mainSearch frame to the search generation that produced
+	// it, so a later result (songs and albums arrive separately) updates the same
+	// frame instead of pushing a duplicate.
+	searchGen int
 }
 
 // Model is the root tea.Model for tubeamp.
@@ -91,6 +110,12 @@ type Model struct {
 	// has since superseded or navigated away from) never steals the view/focus.
 	searchGen int
 
+	// albumGen / coverGen are the search-style stale guards for the two album
+	// fetches: GetAlbum (album page) and the album cover download. A late result
+	// whose generation no longer matches is discarded.
+	albumGen int
+	coverGen int
+
 	// Overlays.
 	overlay   overlayKind
 	help      overlay.Help
@@ -119,6 +144,13 @@ type Model struct {
 	artInflight map[string]struct{}
 	artBlock    string
 
+	// Album-view cover art. Large covers are cached separately from player-bar
+	// art: decoded images by browseID, rendered AlbumCover blocks by
+	// browseID+theme, with albumArtInflight deduping concurrent fetches.
+	albumImgCache    map[string]image.Image
+	albumArtCache    map[string]string
+	albumArtInflight map[string]struct{}
+
 	// Transient status / toast line.
 	status    string
 	statusErr bool
@@ -128,21 +160,24 @@ type Model struct {
 // in which case the affected features are disabled with a status-line notice.
 func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue) Model {
 	m := Model{
-		cfg:          cfg,
-		th:           th,
-		p:            p,
-		c:            c,
-		q:            q,
-		keys:         keymap.Default(),
-		focus:        focusLibrary,
-		libItems:     libraryItems(),
-		playlists:    mockPlaylists(),
-		search:       overlay.NewSearch(),
-		loadedThemes: map[string]*theme.Theme{},
-		imgCache:     map[string]image.Image{},
-		artCache:     map[string]string{},
-		artInflight:  map[string]struct{}{},
-		volume:       cfg.Volume,
+		cfg:              cfg,
+		th:               th,
+		p:                p,
+		c:                c,
+		q:                q,
+		keys:             keymap.Default(),
+		focus:            focusLibrary,
+		libItems:         libraryItems(),
+		playlists:        mockPlaylists(),
+		search:           overlay.NewSearch(),
+		loadedThemes:     map[string]*theme.Theme{},
+		imgCache:         map[string]image.Image{},
+		artCache:         map[string]string{},
+		artInflight:      map[string]struct{}{},
+		albumImgCache:    map[string]image.Image{},
+		albumArtCache:    map[string]string{},
+		albumArtInflight: map[string]struct{}{},
+		volume:           cfg.Volume,
 	}
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
@@ -228,6 +263,31 @@ type searchResultMsg struct {
 	query  string
 	tracks []model.Track
 	err    error
+}
+type albumSearchMsg struct {
+	gen    int
+	query  string
+	albums []model.Album
+	err    error
+}
+
+// albumLoadMsg carries a GetAlbum result. open selects the action: true pushes
+// the album view, false replaces the queue with the album and plays.
+type albumLoadMsg struct {
+	gen    int
+	open   bool
+	title  string
+	album  model.Album
+	tracks []model.Track
+	err    error
+}
+
+// albumCoverMsg carries a downloaded album cover image for the album view.
+type albumCoverMsg struct {
+	gen      int
+	browseID string
+	img      image.Image
+	err      error
 }
 type themesLoadedMsg struct {
 	names  []string
@@ -345,6 +405,38 @@ func searchCmd(c *ytm.Client, query string, gen int) tea.Cmd {
 	}
 }
 
+func albumSearchCmd(c *ytm.Client, query string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		as, err := c.SearchAlbums(ctx, query)
+		return albumSearchMsg{gen: gen, query: query, albums: as, err: err}
+	}
+}
+
+// albumGetCmd browses an album page. open is echoed back in the result so the
+// handler knows whether to play the album or open its view.
+func albumGetCmd(c *ytm.Client, browseID, title string, open bool, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		a, ts, err := c.GetAlbum(ctx, browseID)
+		return albumLoadMsg{gen: gen, open: open, title: title, album: a, tracks: ts, err: err}
+	}
+}
+
+// albumCoverCmd downloads (only) the album cover at px×px; rendering happens back
+// in Update so a theme change re-renders locally without re-downloading.
+func albumCoverCmd(browseID, thumbURL string, gen int) tea.Cmd {
+	url := art.RewriteThumbURL(thumbURL, 64)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		img, err := art.Fetch(ctx, url)
+		return albumCoverMsg{gen: gen, browseID: browseID, img: img, err: err}
+	}
+}
+
 func themesLoadCmd() tea.Cmd {
 	return func() tea.Msg {
 		dir := config.ThemesDir()
@@ -420,20 +512,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchResultMsg:
 		// Ignore a stale result: the user has since issued another search or
-		// navigated to a different main view.
+		// navigated away from these results.
 		if msg.gen != m.searchGen {
 			return m, nil
 		}
-		m.status = ""
-		switch {
-		case msg.err != nil:
+		if msg.err != nil {
 			m.setError("search failed: " + msg.err.Error())
-		case len(msg.tracks) == 0:
-			m.setStatus("no results for \"" + msg.query + "\"")
-		default:
-			m.pushMain("Search: \""+msg.query+"\"", msg.tracks)
-			m.setFocus(focusMain)
+			return m, nil
 		}
+		m.status = ""
+		m.ensureSearchFrame(msg.query).tracks = msg.tracks
+		return m, nil
+
+	case albumSearchMsg:
+		if msg.gen != m.searchGen {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.setError("album search failed: " + msg.err.Error())
+			return m, nil
+		}
+		m.status = ""
+		m.ensureSearchFrame(msg.query).albums = msg.albums
+		return m, nil
+
+	case albumLoadMsg:
+		if msg.gen != m.albumGen {
+			return m, nil
+		}
+		m.status = ""
+		if msg.err != nil {
+			m.setError("could not load album: " + msg.err.Error())
+			return m, nil
+		}
+		if msg.open {
+			m.pushAlbum(msg.album, msg.tracks)
+			m.setFocus(focusMain)
+			return m, m.ensureAlbumCover(msg.album)
+		}
+		// Play: replace the queue with the whole album from track 0.
+		if len(msg.tracks) == 0 {
+			m.setStatus("album has no tracks")
+			return m, nil
+		}
+		m.q.Set(msg.tracks, 0)
+		m.queueCursor = m.q.Index()
+		if m.p == nil {
+			m.setError("mpv not found — playback disabled")
+			return m, nil
+		}
+		m.setStatus("Playing " + msg.album.Title)
+		return m, tea.Batch(m.reflectCurrent(true), replaceCmd(m.p, msg.tracks, 0))
+
+	case albumCoverMsg:
+		delete(m.albumArtInflight, msg.browseID)
+		if msg.gen != m.coverGen {
+			return m, nil // stale cover for a superseded album view
+		}
+		if msg.err != nil || msg.img == nil {
+			return m, nil // keep the placeholder
+		}
+		m.albumImgCache[msg.browseID] = msg.img
+		m.albumArtCache[msg.browseID+"|"+m.th.Name] = art.Render(msg.img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
 		return m, nil
 
 	case themesLoadedMsg:
@@ -522,7 +662,13 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, k.Esc):
 		if len(m.stack) > 1 {
+			popped := m.stack[len(m.stack)-1]
 			m.stack = m.stack[:len(m.stack)-1]
+			// Popping search results invalidates any still-pending result for
+			// them so a late songs/albums response cannot re-create the frame.
+			if popped.kind == mainSearch {
+				m.searchGen++
+			}
 		}
 
 	case key.Matches(msg, k.Up):
@@ -564,6 +710,8 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case key.Matches(msg, k.Open):
+		cmd = m.handleOpen()
 	case key.Matches(msg, k.InsertNext):
 		if m.focus == focusMain {
 			if t, ok := m.mainCurrent(); ok {
@@ -646,7 +794,9 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.searchGen++
 			m.setStatus("searching…")
-			return m, searchCmd(m.c, q, m.searchGen)
+			// Songs and albums are fetched concurrently; whichever returns first
+			// renders, the other fills in its section on arrival.
+			return m, tea.Batch(searchCmd(m.c, q, m.searchGen), albumSearchCmd(m.c, q, m.searchGen))
 		default:
 			cmd := m.search.Update(msg)
 			return m, cmd
@@ -657,6 +807,7 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Esc):
 			m.th = m.prevTheme
 			m.overlay = overlayNone
+			m.refreshAlbumCover()
 			return m, m.refreshArt()
 		case key.Matches(msg, m.keys.Enter):
 			if !m.themeMenu.Loading {
@@ -666,6 +817,7 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 					m.cfg.Theme = name
 					m.overlay = overlayNone
+					m.refreshAlbumCover()
 					return m, tea.Batch(m.refreshArt(), saveConfigCmd(*m.cfg))
 				}
 			}
@@ -700,7 +852,8 @@ func (m *Model) listState() (*int, int) {
 		return &m.queueCursor, m.q.Len()
 	case focusMain:
 		top := &m.stack[len(m.stack)-1]
-		return &top.cursor, len(top.tracks)
+		// A search frame's cursor runs through both sections (songs then albums).
+		return &top.cursor, len(top.tracks) + len(top.albums)
 	}
 	return nil, 0
 }
@@ -759,17 +912,67 @@ func (m *Model) handleEnter() tea.Cmd {
 		return tea.Batch(m.reflectCurrent(true), jumpCmd(m.p, m.queueCursor))
 	case focusMain:
 		top := m.stack[len(m.stack)-1]
-		if len(top.tracks) > 0 {
-			m.q.Set(top.tracks, top.cursor)
-			m.queueCursor = m.q.Index()
-			if m.p == nil {
-				m.setError("mpv not found — playback disabled")
-				return nil
+		if top.kind == mainSearch && top.cursor >= len(top.tracks) {
+			// An album row is selected: fetch the album and play it.
+			ai := top.cursor - len(top.tracks)
+			if ai >= 0 && ai < len(top.albums) {
+				return m.openAlbum(top.albums[ai], false)
 			}
-			return tea.Batch(m.reflectCurrent(true), replaceCmd(m.p, top.tracks, top.cursor))
+			return nil
 		}
+		// A track row (plain list, search song, or album-view track): replace the
+		// queue with this list starting at the selected track and play.
+		return m.playTracks(top.tracks, top.cursor)
 	}
 	return nil
+}
+
+// playTracks replaces the queue with ts starting at start and plays it. The
+// local mirror is updated for instant feedback even when playback is disabled
+// (nil player), in which case it only sets the disabled notice.
+func (m *Model) playTracks(ts []model.Track, start int) tea.Cmd {
+	if len(ts) == 0 {
+		return nil
+	}
+	if start < 0 || start >= len(ts) {
+		start = 0
+	}
+	m.q.Set(ts, start)
+	m.queueCursor = m.q.Index()
+	if m.p == nil {
+		m.setError("mpv not found — playback disabled")
+		return nil
+	}
+	return tea.Batch(m.reflectCurrent(true), replaceCmd(m.p, ts, start))
+}
+
+// handleOpen implements the `o` action: open the album under the cursor (only
+// meaningful on an album row of a search-results frame).
+func (m *Model) handleOpen() tea.Cmd {
+	if m.focus != focusMain {
+		return nil
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainSearch || top.cursor < len(top.tracks) {
+		return nil
+	}
+	ai := top.cursor - len(top.tracks)
+	if ai < 0 || ai >= len(top.albums) {
+		return nil
+	}
+	return m.openAlbum(top.albums[ai], true)
+}
+
+// openAlbum fetches an album page via GetAlbum. open=true opens the album view;
+// open=false plays the album. A nil client just sets a status notice.
+func (m *Model) openAlbum(a model.Album, open bool) tea.Cmd {
+	if m.c == nil {
+		m.setError("album lookup needs network/auth")
+		return nil
+	}
+	m.albumGen++
+	m.setStatus("loading " + a.Title + "…")
+	return albumGetCmd(m.c, a.BrowseID, a.Title, open, m.albumGen)
 }
 
 // skip moves to the next (forward) or previous track. The local mirror advances
@@ -891,12 +1094,14 @@ func (m *Model) refreshArt() tea.Cmd {
 	return artFetchCmd(m.nowPlaying)
 }
 
-// applyThemePreview live-applies the highlighted theme and re-renders the art.
+// applyThemePreview live-applies the highlighted theme and re-renders the art
+// (player-bar cover and, when open, the album view cover).
 func (m *Model) applyThemePreview() tea.Cmd {
 	name := m.themeMenu.Selected()
 	if t, ok := m.loadedThemes[name]; ok {
 		m.th = t
 	}
+	m.refreshAlbumCover()
 	return m.refreshArt()
 }
 
@@ -943,9 +1148,101 @@ func (m *Model) setMain(title string, tracks []model.Track) {
 	m.searchGen++
 }
 
-// pushMain pushes a new content frame onto the main-view stack.
+// pushMain pushes a new track-list content frame onto the main-view stack.
 func (m *Model) pushMain(title string, tracks []model.Track) {
 	m.stack = append(m.stack, mainContent{title: title, tracks: tracks})
+}
+
+// ensureSearchFrame returns the search-results frame for the current search
+// generation, pushing a fresh one (and focusing the main view) the first time a
+// result for this generation arrives. Songs and albums arrive separately and
+// share a generation, so the second result updates the same frame.
+func (m *Model) ensureSearchFrame(query string) *mainContent {
+	if n := len(m.stack); n > 0 {
+		if top := &m.stack[n-1]; top.kind == mainSearch && top.searchGen == m.searchGen {
+			return top
+		}
+	}
+	m.stack = append(m.stack, mainContent{
+		kind:      mainSearch,
+		title:     "Search: \"" + query + "\"",
+		searchGen: m.searchGen,
+	})
+	m.setFocus(focusMain)
+	return &m.stack[len(m.stack)-1]
+}
+
+// pushAlbum pushes an album detail view onto the main-view stack. esc pops back
+// to the search results with the prior cursor intact.
+func (m *Model) pushAlbum(a model.Album, tracks []model.Track) {
+	m.stack = append(m.stack, mainContent{
+		kind:   mainAlbum,
+		title:  a.Title,
+		album:  a,
+		tracks: tracks,
+	})
+}
+
+// topAlbum returns the album of the top frame when it is an album view.
+func (m *Model) topAlbum() (model.Album, bool) {
+	if len(m.stack) == 0 {
+		return model.Album{}, false
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.kind != mainAlbum {
+		return model.Album{}, false
+	}
+	return top.album, true
+}
+
+// ensureAlbumCover makes sure the album's cover is (being) rendered for the
+// current theme. It prefers a cached render, then a local re-render of an
+// already-decoded image, otherwise a one-shot download (deduped per browseID).
+// The view falls back to a placeholder until a render is available.
+func (m *Model) ensureAlbumCover(a model.Album) tea.Cmd {
+	key := a.BrowseID + "|" + m.th.Name
+	if _, ok := m.albumArtCache[key]; ok {
+		return nil
+	}
+	if img, ok := m.albumImgCache[a.BrowseID]; ok {
+		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+		return nil
+	}
+	if a.ThumbURL == "" {
+		return nil
+	}
+	if _, busy := m.albumArtInflight[a.BrowseID]; busy {
+		return nil
+	}
+	m.albumArtInflight[a.BrowseID] = struct{}{}
+	m.coverGen++
+	return albumCoverCmd(a.BrowseID, a.ThumbURL, m.coverGen)
+}
+
+// refreshAlbumCover re-renders the open album view's cover for the current theme
+// from the decoded-image cache (no download). A cache miss leaves the
+// placeholder until the in-flight fetch (keyed by browseID) completes.
+func (m *Model) refreshAlbumCover() {
+	a, ok := m.topAlbum()
+	if !ok {
+		return
+	}
+	key := a.BrowseID + "|" + m.th.Name
+	if _, ok := m.albumArtCache[key]; ok {
+		return
+	}
+	if img, ok := m.albumImgCache[a.BrowseID]; ok {
+		m.albumArtCache[key] = art.Render(img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
+	}
+}
+
+// albumCoverBlock returns the rendered cover for the album view, or a procedural
+// placeholder while the real cover is loading.
+func (m Model) albumCoverBlock(a model.Album) string {
+	if s, ok := m.albumArtCache[a.BrowseID+"|"+m.th.Name]; ok {
+		return s
+	}
+	return art.Placeholder(a.BrowseID, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
 }
 
 func (m *Model) setStatus(s string) { m.status, m.statusErr = s, false }
@@ -998,7 +1295,17 @@ func (m Model) View() string {
 	if m.hasNow {
 		playingID = m.nowPlaying.VideoID
 	}
-	mainBox := panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, topH, m.focus == focusMain)
+	mainFocused := m.focus == focusMain
+	var mainBox string
+	switch top.kind {
+	case mainAlbum:
+		cover := m.albumCoverBlock(top.album)
+		mainBox = panels.AlbumView(m.th, "4 "+top.title, top.album, top.tracks, top.cursor, cover, playingID, mainW, topH, mainFocused)
+	case mainSearch:
+		mainBox = panels.SearchView(m.th, "4 "+top.title, top.tracks, top.albums, top.cursor, playingID, mainW, topH, mainFocused)
+	default:
+		mainBox = panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, topH, mainFocused)
+	}
 
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, mainBox)
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
@@ -1089,8 +1396,19 @@ func (m Model) contextHints() []hint {
 		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
 			{"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}, {k.Help.Help().Key, "help"}}
 	default: // focusMain
-		return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
-			{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+		top := m.stack[len(m.stack)-1]
+		switch {
+		case top.kind == mainAlbum:
+			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play from here"},
+				{k.Esc.Help().Key, "back"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+		case top.kind == mainSearch && top.cursor >= len(top.tracks):
+			// An album row is selected.
+			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play album"},
+				{k.Open.Help().Key, "open album"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+		default:
+			return []hint{{"↑/↓", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
+				{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+		}
 	}
 }
 

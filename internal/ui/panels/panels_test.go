@@ -64,3 +64,33 @@ func TestQueueAlbumSuffix(t *testing.T) {
 		t.Errorf("narrow queue dropped the track row; title missing:\n%s", narrow)
 	}
 }
+
+// TestSearchViewSections verifies the search view renders both the "Songs" and
+// "Albums" section headers along with a song row and an album row.
+func TestSearchViewSections(t *testing.T) {
+	th := theme.Default()
+	tracks := []model.Track{albumTrack()}
+	albums := []model.Album{{BrowseID: "MPRE_x", Title: "Some Record", Artists: []string{"A Band"}, Year: "2019"}}
+
+	v := ansi.Strip(SearchView(th, "Search", tracks, albums, 0, "", 100, 14, true))
+	for _, want := range []string{"Songs", "Albums", "Smells Like Teen Spirit", "Some Record", "2019", "▤"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("SearchView missing %q in:\n%s", want, v)
+		}
+	}
+}
+
+// TestAlbumViewHeaderAndTracks verifies the album view renders the album title,
+// year, and a track row from its track list.
+func TestAlbumViewHeaderAndTracks(t *testing.T) {
+	th := theme.Default()
+	a := model.Album{BrowseID: "MPRE_y", Title: "Great Album", Artists: []string{"The Band"}, Year: "2008"}
+	tracks := []model.Track{albumTrack()}
+
+	v := ansi.Strip(AlbumView(th, "4 Great Album", a, tracks, 0, "", "", 100, 18, true))
+	for _, want := range []string{"Great Album", "2008", "Smells Like Teen Spirit"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("AlbumView missing %q in:\n%s", want, v)
+		}
+	}
+}
