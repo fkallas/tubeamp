@@ -63,8 +63,8 @@ go build ./cmd/tubeamp
 ./tubeamp
 ```
 
-Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `j/k` move (`ctrl+d`/`ctrl+u`
-half-page), `enter` plays,
+Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels (including the lyrics panel
+while it is on screen), `j/k` move (`ctrl+d`/`ctrl+u` half-page), `enter` plays,
 `space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `↑/↓` or `+/-` volume, `/` search,
 `o` open album — an album row, or the album the highlighted **song** belongs to
 (works on song rows in search, your library, playlists, and the queue), `T` theme
@@ -77,10 +77,8 @@ a song row opens that song's album view too.
 
 ## Lyrics
 
-While a track is playing, a synced-lyrics panel appears in the right column,
-below the main view and above the player bar. It is **display only** — you cannot
-focus it and it consumes no keys; `1`/`2`/`3`/`4` and `h`/`l` still cycle only the
-four panels.
+While a track is playing, a lyrics panel appears in the right column, below the
+main view and above the player bar.
 
 - **Synced** lyrics (LRC) scroll automatically, with the current line highlighted
   and its neighbours dimmed, in step with playback (the panel marks itself
@@ -91,6 +89,17 @@ four panels.
   so replays and seeks never refetch. The panel hides automatically when nothing
   is playing or the terminal is too short to show it without crowding the main
   view.
+
+The panel is **focusable while it is on screen**: `h`/`l` cycle onto it after the
+main view (it has no number key, and the cycle skips it while hidden). With it
+focused, `j`/`k`, `ctrl+u`/`ctrl+d` and `g`/`G` scroll the lyrics:
+
+- **Unsynced** lyrics scroll line by line / by half-pages.
+- **Synced** lyrics *peek-scroll*: scrolling pauses auto-follow (the panel marks
+  itself `⏸ paused — esc to follow`) so you can read ahead or back. Auto-follow
+  re-engages — snapping back to the live line — when you press `esc`, after a few
+  seconds of no scrolling, or when you move focus away. While focused and still
+  following, the panel marks itself `▶ following`.
 
 ## Gapless playback
 

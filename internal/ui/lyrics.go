@@ -1,13 +1,18 @@
-// Package ui — synced-lyrics panel logic: the per-track fetch (LRCLIB with a
-// YouTube Music plain-text fallback), the videoID-keyed cache that keeps replays
-// and seeks from refetching, and the layout/visibility helpers the View uses.
+// Package ui — lyrics panel logic: the per-track fetch (LRCLIB with a YouTube
+// Music plain-text fallback), the videoID-keyed cache that keeps replays and
+// seeks from refetching, the layout/visibility helpers the View uses, and the
+// focused-panel scroll behaviour.
 //
-// The panel is PURE DISPLAY: it is never a focusArea, never receives keys, and
-// the 1/2/3/4 + h/l focus controls never reach it. It is shown only while a
-// track is playing (m.hasNow) and the terminal is tall enough to fit it without
-// starving the main view (see lyricsBandHeight). The highlighted line is driven
-// off the same playback position the progress bar uses (m.timePos), via
-// lyrics.CurrentLine — no extra event wiring.
+// The panel is shown only while a track is playing (m.hasNow) and the terminal
+// is tall enough to fit it without starving the main view (see lyricsBandHeight).
+// It is FOCUSABLE only while visible (focusLyrics, reachable via the h/l cycle —
+// no number key). When unfocused it is pure display: synced auto-follows the
+// live line (driven off m.timePos via lyrics.CurrentLine, no extra event wiring)
+// and unsynced shows from the top. When focused, j/k + ctrl+u/d + g/G scroll it:
+// unsynced moves a plain top-line offset; synced PEEK-scrolls, temporarily
+// detaching auto-follow (see scrollLyrics). A detached peek re-engages on esc or
+// after lyricsFollowResumeSec of idle playback (maybeResumeLyrics, piggybacked
+// on EvTimePos — no extra ticker).
 package ui
 
 import (
@@ -33,6 +38,13 @@ const (
 	lyricsBandMin  = 6  // smallest lyrics box worth showing (4 content rows)
 	lyricsMainMinH = 8  // the main view keeps at least this many box rows when lyrics show
 )
+
+// lyricsFollowResumeSec is how long (in playback seconds) a synced lyrics peek
+// stays detached with no further scroll before auto-follow re-engages. The idle
+// timer piggybacks on the frequent EvTimePos events (no extra ticker): each
+// scroll arms a resume deadline at timePos+lyricsFollowResumeSec, and a later
+// EvTimePos past it re-engages follow (see maybeResumeLyrics).
+const lyricsFollowResumeSec = 5.0
 
 // lyricStatus tracks one track's lyrics-lookup lifecycle in the cache.
 type lyricStatus int
@@ -159,4 +171,118 @@ func (m Model) lyricsForView() (panels.LyricsState, []lyrics.Line, string, int) 
 		return panels.LyricsSynced, r.ly.Lines, "", lyrics.CurrentLine(r.ly.Lines, pos)
 	}
 	return panels.LyricsUnsynced, nil, r.ly.Plain, -1
+}
+
+// currentLyric returns the cached lyrics result for the now-playing track.
+func (m Model) currentLyric() (lyricResult, bool) {
+	if !m.hasNow {
+		return lyricResult{}, false
+	}
+	r, ok := m.lyricsCache[m.nowPlaying.VideoID]
+	return r, ok
+}
+
+// lyricsVisibleRows is the number of lyric content rows currently shown (the
+// lyrics box height minus its two border rows), or 0 when the panel is hidden.
+func (m Model) lyricsVisibleRows() int {
+	h := m.lyricsBandHeight(m.topAreaHeight())
+	if h < 2 {
+		return 0
+	}
+	return h - 2
+}
+
+// lyricsVisible reports whether the lyrics panel is currently on screen, matching
+// the View's layout math (a track is playing and the top area is tall enough to
+// fit the band without starving the main view). It gates focusLyrics: the panel
+// is focusable only while visible.
+func (m Model) lyricsVisible() bool {
+	if m.width < minWidth || m.height < minHeight {
+		return false
+	}
+	return m.lyricsBandHeight(m.topAreaHeight()) > 0
+}
+
+// lyricsMaxScroll clamps the unsynced scroll offset so the last line never
+// scrolls above the top of the window.
+func (m Model) lyricsMaxScroll(plain string) int {
+	total := len(strings.Split(plain, "\n"))
+	if mx := total - m.lyricsVisibleRows(); mx > 0 {
+		return mx
+	}
+	return 0
+}
+
+// scrollLyrics applies a relative scroll to the focused lyrics panel. Unsynced:
+// it moves the plain top-line offset, clamped to content. Synced: it PEEK-scrolls
+// — detaching auto-follow (initialising the peek at the live line the first
+// time) and (re)arming the auto-follow resume deadline. A no-op when the panel
+// has no scrollable lyrics (loading / none).
+func (m *Model) scrollLyrics(delta int) {
+	r, ok := m.currentLyric()
+	if !ok || r.status != lyricResolved || !r.found {
+		return
+	}
+	if r.ly.Synced {
+		m.beginPeek(r.ly.Lines)
+		m.lyricsScroll = clamp(m.lyricsScroll+delta, 0, len(r.ly.Lines)-1)
+	} else {
+		m.lyricsScroll = clamp(m.lyricsScroll+delta, 0, m.lyricsMaxScroll(r.ly.Plain))
+	}
+}
+
+// scrollLyricsEdge jumps the focused lyrics panel to the top (g) or bottom (G).
+// Synced jumps detach auto-follow exactly like a relative peek-scroll.
+func (m *Model) scrollLyricsEdge(top bool) {
+	r, ok := m.currentLyric()
+	if !ok || r.status != lyricResolved || !r.found {
+		return
+	}
+	switch {
+	case r.ly.Synced:
+		m.beginPeek(r.ly.Lines)
+		if top {
+			m.lyricsScroll = 0
+		} else {
+			m.lyricsScroll = len(r.ly.Lines) - 1
+		}
+	case top:
+		m.lyricsScroll = 0
+	default:
+		m.lyricsScroll = m.lyricsMaxScroll(r.ly.Plain)
+	}
+}
+
+// beginPeek detaches synced auto-follow (initialising the peek index at the live
+// line the first time) and (re)arms the auto-follow resume deadline at the
+// current playback position + lyricsFollowResumeSec.
+func (m *Model) beginPeek(lines []lyrics.Line) {
+	if !m.lyricsDetached {
+		pos := time.Duration(m.timePos * float64(time.Second))
+		if cur := lyrics.CurrentLine(lines, pos); cur > 0 {
+			m.lyricsScroll = cur
+		} else {
+			m.lyricsScroll = 0
+		}
+		m.lyricsDetached = true
+	}
+	m.lyricsResumeAt = m.timePos + lyricsFollowResumeSec
+}
+
+// reengageLyrics clears any synced peek-scroll detachment, snapping the panel
+// back to auto-follow at the live line and resetting the scroll offset. It also
+// resets the unsynced scroll offset (re-engaged on track change / leaving focus).
+func (m *Model) reengageLyrics() {
+	m.lyricsDetached = false
+	m.lyricsScroll = 0
+}
+
+// maybeResumeLyrics re-engages synced auto-follow once a detached peek has been
+// idle (no further scroll) for lyricsFollowResumeSec of playback. Called on each
+// EvTimePos so no extra ticker is needed; detached is only ever set while
+// focusLyrics is active.
+func (m *Model) maybeResumeLyrics() {
+	if m.lyricsDetached && m.timePos >= m.lyricsResumeAt {
+		m.reengageLyrics()
+	}
 }

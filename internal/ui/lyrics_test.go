@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fkallas/tubeamp/internal/lyrics"
 	"github.com/fkallas/tubeamp/internal/model"
+	"github.com/fkallas/tubeamp/internal/player"
 	"github.com/fkallas/tubeamp/internal/ytm"
 )
 
@@ -92,21 +94,178 @@ func TestLyricsPanelHiddenWhenTooShort(t *testing.T) {
 	}
 }
 
-// TestLyricsPanelNeverFocusable: the panel is not a focusArea — the 1/2/3/4 and
-// h/l controls never reach it; focus only ever cycles the four panels.
-func TestLyricsPanelNeverFocusable(t *testing.T) {
-	if int(focusCount) != 4 {
-		t.Fatalf("focusCount = %d, want 4 (lyrics panel must not be a focusArea)", int(focusCount))
+// unsyncedResult builds an n-line plain (unsynced) lyrics result.
+func unsyncedResult(n int) lyricResult {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("PLAIN %02d", i)
 	}
+	return lyricResult{status: lyricResolved, found: true,
+		ly: lyrics.Lyrics{Plain: strings.Join(lines, "\n"), Source: lyrics.SourceYTMusic}}
+}
+
+// focusLyricsPanel cycles 'l' until the lyrics panel is focused (or fails).
+func focusLyricsPanel(t *testing.T, m Model) Model {
+	t.Helper()
+	for i := 0; i < int(focusCount)+1; i++ {
+		if m.FocusedPanel() == "Lyrics" {
+			return m
+		}
+		m = send(m, runes("l"))
+	}
+	t.Fatalf("h/l cycle never reached the Lyrics panel; focus stuck at %q", m.FocusedPanel())
+	return m
+}
+
+// TestLyricsHiddenNeverFocusable: while the lyrics panel is hidden (nothing
+// playing) the h/l cycle and the 1/2/3/4 keys never land on it; focus only ever
+// reaches the four always-visible panels.
+func TestLyricsHiddenNeverFocusable(t *testing.T) {
+	m := newTestModel(t, 120, 40) // nothing playing => lyrics hidden
+	allowed := map[string]bool{"Library": true, "Playlists": true, "Queue": true, "Main": true}
+	for _, k := range []string{"1", "2", "3", "4", "l", "l", "l", "l", "l", "h", "h", "h", "h", "h"} {
+		m = send(m, runes(k))
+		if got := m.FocusedPanel(); !allowed[got] {
+			t.Fatalf("after %q focus = %q, want one of the four panels (lyrics is hidden)", k, got)
+		}
+	}
+}
+
+// TestLyricsFocusReachableWhenVisible: with a visible lyrics panel the h/l cycle
+// reaches focusLyrics, and the number keys still only address the four panels.
+func TestLyricsFocusReachableWhenVisible(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	m = playingWith(m, "v1", syncedResult(10))
 
-	allowed := map[string]bool{"Library": true, "Playlists": true, "Queue": true, "Main": true}
-	for _, k := range []string{"1", "2", "3", "4", "l", "l", "l", "l", "h", "h", "h", "h"} {
-		m = send(m, runes(k))
-		if got := m.FocusedPanel(); !allowed[got] {
-			t.Fatalf("after %q focus = %q, want one of the four panels", k, got)
+	// l cycles Library→Playlists→Queue→Main→Lyrics→Library.
+	for _, want := range []string{"Playlists", "Queue", "Main", "Lyrics", "Library"} {
+		m = send(m, runes("l"))
+		if got := m.FocusedPanel(); got != want {
+			t.Fatalf("after 'l' focus = %q, want %q", got, want)
 		}
+	}
+	// The number keys never select the lyrics panel.
+	for _, k := range []string{"1", "2", "3", "4"} {
+		m = send(m, runes(k))
+		if got := m.FocusedPanel(); got == "Lyrics" {
+			t.Fatalf("number key %q selected the lyrics panel", k)
+		}
+	}
+}
+
+// TestLyricsUnsyncedScroll: a focused, visible unsynced-lyrics panel scrolls a
+// plain offset with j (one line) and ctrl+d (half page), and the rendered first
+// visible line follows the offset.
+func TestLyricsUnsyncedScroll(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = playingWith(m, "v1", unsyncedResult(60))
+	m = focusLyricsPanel(t, m)
+
+	m = send(m, runes("j"))
+	if got := m.LyricsScrollOffset(); got != 1 {
+		t.Fatalf("after 'j' lyrics scroll = %d, want 1", got)
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "PLAIN 01") || strings.Contains(v, "PLAIN 00") {
+		t.Errorf("after scrolling one line the panel should start at \"PLAIN 01\" (no \"PLAIN 00\"):\n%s", v)
+	}
+
+	before := m.LyricsScrollOffset()
+	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if got := m.LyricsScrollOffset(); got != before+m.halfPageRows() {
+		t.Fatalf("after ctrl+d lyrics scroll = %d, want %d", got, before+m.halfPageRows())
+	}
+
+	// g/G jump to the clamped edges: G lands at the bottom (offset > 0, with the
+	// last lines still on screen), g returns to the top.
+	m = send(m, runes("G"))
+	if got := m.LyricsScrollOffset(); got <= 0 {
+		t.Fatalf("after 'G' lyrics scroll should be at the bottom edge (>0), got %d", got)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "PLAIN 59") {
+		t.Errorf("after 'G' the panel should show the last line \"PLAIN 59\":\n%s", v)
+	}
+	m = send(m, runes("g"))
+	if got := m.LyricsScrollOffset(); got != 0 {
+		t.Fatalf("after 'g' lyrics scroll = %d, want 0", got)
+	}
+}
+
+// TestLyricsSyncedPeekDetachAndResume: a focused synced panel peek-scrolls,
+// detaching auto-follow so the rendered line stops tracking the position; a later
+// EvTimePos past the ~5s resume deadline re-engages follow and the rendered line
+// tracks the live position again.
+func TestLyricsSyncedPeekDetachAndResume(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = playingWith(m, "v1", syncedResult(40)) // line i at 2*i seconds
+	m = focusLyricsPanel(t, m)
+
+	m.timePos = 10 // live line 5 (At = 10s)
+	m = send(m, runes("j"))
+	if !m.LyricsDetached() {
+		t.Fatal("peek-scroll did not detach synced auto-follow")
+	}
+	// Detached: the panel shows the peeked line (6), not the live one, even as
+	// playback advances.
+	m = send(m, playerEventMsg(player.Event{Kind: player.EvTimePos, Float: 11})) // before deadline (15)
+	if !m.LyricsDetached() {
+		t.Fatal("auto-follow re-engaged before the resume deadline")
+	}
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "line 06") {
+		t.Errorf("detached panel should show the peeked line \"line 06\":\n%s", v)
+	}
+	if strings.Contains(v, "line 30") {
+		t.Errorf("detached panel must not jump to a far live line")
+	}
+
+	// A later EvTimePos past the deadline re-engages auto-follow and snaps to the
+	// live line.
+	m = send(m, playerEventMsg(player.Event{Kind: player.EvTimePos, Float: 16})) // past deadline
+	if m.LyricsDetached() {
+		t.Fatal("auto-follow did not re-engage after the resume deadline")
+	}
+	v = ansi.Strip(m.View())
+	if !strings.Contains(v, "line 08") { // 16s => line 8 (At = 16s)
+		t.Errorf("after re-engaging, the panel should track the live line \"line 08\":\n%s", v)
+	}
+}
+
+// TestLyricsEscReengagesWithoutPoppingStack: esc while the focused synced panel
+// is detached snaps back to following and does NOT pop the main-view stack.
+func TestLyricsEscReengagesWithoutPoppingStack(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	// Two frames so a stray pop would be observable.
+	m.stack = append(m.stack, mainContent{title: "Second", tracks: mockLibraryTracks("Liked Songs")})
+	m = playingWith(m, "v1", syncedResult(40))
+	m = focusLyricsPanel(t, m)
+
+	m.timePos = 10
+	m = send(m, runes("j"))
+	if !m.LyricsDetached() {
+		t.Fatal("peek-scroll did not detach auto-follow")
+	}
+	depth := len(m.stack)
+	m = send(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.LyricsDetached() {
+		t.Error("esc should re-engage auto-follow (clear detached)")
+	}
+	if len(m.stack) != depth {
+		t.Errorf("esc while detached popped the stack: depth %d -> %d", depth, len(m.stack))
+	}
+}
+
+// TestLyricsFocusFallsBackWhenHidden: when the lyrics panel is focused and then
+// hides (the terminal becomes too short), focus falls back to the main view.
+func TestLyricsFocusFallsBackWhenHidden(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = playingWith(m, "v1", syncedResult(10))
+	m = focusLyricsPanel(t, m)
+
+	// A resize too short to fit the lyrics band hides it.
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 20})
+	if got := m.FocusedPanel(); got != "Main" {
+		t.Fatalf("focus after the panel hid = %q, want Main", got)
 	}
 }
 

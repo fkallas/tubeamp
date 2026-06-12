@@ -588,7 +588,7 @@ tubeamp                              v0.1.0   ● account   ← wordmark header 
 │            ││                                 │
 ╰────────────╯╰─────────────────────────────────╮
 ╭─3 Queue────╮│ Lyrics                 ♪ synced  │  ← only while playing + tall
-│            ││   …synced lyrics window…         │     enough; never focusable
+│            ││   …synced lyrics window…         │     enough; focusable when shown
 ╰────────────╯╰─────────────────────────────────╯
 ╭─ player bar (art 8×4 cells │ title/artist/album │ progress, vol) ─╮
 ╰───────────────────────────────────────────────────────────────────╯
@@ -676,11 +676,15 @@ The main view is a stack of frames; a frame is one of three kinds:
 
 ### Lyrics panel (`panels.LyricsView`)
 
-A synced-lyrics panel rides in the RIGHT column, below the main view and above
-the player bar. It is **pure display and never focusable**: it is NOT a
-`focusArea`, the `1`/`2`/`3`/`4` and `h`/`l` controls never reach it, and it
-handles no keys (`focusCount` stays 4 — focus only cycles Library/Playlists/
-Queue/Main).
+A lyrics panel rides in the RIGHT column, below the main view and above the
+player bar. It is a `focusArea` (`focusLyrics`) but **focusable ONLY WHILE
+VISIBLE**: it has NO number key (`1`/`2`/`3`/`4` stay the four main panels) and
+is reached only via the `h`/`l` cycle, which now runs
+Library→Playlists→Queue→Main→Lyrics→wrap (`focusCount` = 5), **skipping Lyrics
+whenever it is hidden** (`m.lyricsVisible()`). If focus is on Lyrics and the
+panel hides (playback stops / terminal too short), focus falls back to Main
+(`reconcileLyricsFocus`, called from the resize, player-event and clear-queue
+paths).
 
 - **Visibility.** Shown only when a track is playing (`m.hasNow`) AND the top
   area is tall enough to fit it without starving the main view: the band is a
@@ -690,17 +694,33 @@ Queue/Main).
   most `lyricsBandRows` (10) tall. The split is of the right column only, so the
   rendered view still totals exactly the terminal height with full-width rows at
   every size (measured with `lipgloss.Height`/`Width`).
-- **Content.** A bordered box (theme inactive border — never active/focused)
-  titled "Lyrics" with a right-aligned state marker (`♪ synced` in Accent /
-  `unsynced` Muted / `no lyrics` Muted; no marker while loading). Synced: a
-  window of lines centered on the current line — current in PlayingStyle,
-  immediate neighbours in Primary, the rest Muted — auto-scrolling as playback
-  advances. Unsynced: the plain text from the top in Primary. Loading:
+- **Content.** A bordered box (active border + active title when focused, the
+  theme inactive border otherwise — like any panel) titled "Lyrics" with a
+  right-aligned state marker (`♪ synced` in Accent / `unsynced` Muted /
+  `no lyrics` Muted / `⏸ paused — esc to follow` Muted while a focused synced
+  peek is detached; no marker while loading). Synced (following): a window of
+  lines centered on the current line — current in PlayingStyle, immediate
+  neighbours in Primary, the rest Muted — auto-scrolling as playback advances.
+  Unsynced: the plain text from the scroll offset in Primary. Loading:
   "searching for lyrics…" (Muted). None: "No lyrics found." (Muted). Colours come
   strictly from theme tokens.
-- **Sync source.** The highlighted line is driven off the SAME playback position
-  the progress bar uses (`m.timePos`, updated by `EvTimePos`), via
-  `lyrics.CurrentLine` — no new event wiring.
+- **Sync source.** When unfocused (or focused+following) the highlighted line is
+  driven off the SAME playback position the progress bar uses (`m.timePos`,
+  updated by `EvTimePos`), via `lyrics.CurrentLine` — no new event wiring.
+- **Scroll (focused only).** `j`/`k`, `ctrl+u`/`ctrl+d` (reusing `halfPageRows`),
+  `g`/`G` scroll the panel. **Unsynced:** a plain top-line scroll offset, clamped
+  to content. **Synced:** PEEK-scroll — it temporarily DETACHES auto-follow
+  (`lyricsDetached`), showing the user's scrolled line index (`lyricsScroll`)
+  instead of the live one. A detached peek re-engages auto-follow (snapping back
+  to the live line) when (a) `esc` is pressed while `focusLyrics` is active and
+  detached — the esc is CONSUMED and does NOT pop the main-view stack (esc only
+  pops the stack when lyrics is not focused, or focused but not detached); or
+  (b) after ~5s of playback with no further scroll — an idle timer with NO new
+  ticker: each scroll arms `lyricsResumeAt = m.timePos + lyricsFollowResumeSec`
+  (5s) and a later `EvTimePos` past it re-engages (`maybeResumeLyrics`). Leaving
+  `focusLyrics` (h/l away, panel hides, or a track change) also re-engages follow.
+  Detached state ONLY applies while `focusLyrics` is active. Test seams:
+  `Model.LyricsScrollOffset()` and `Model.LyricsDetached()`.
 - **Fetch + cache.** On a track change (new videoID) the lyrics state is
   set to "loading" and a `tea.Cmd` (never blocking `Update`) calls
   `lyrics.FetchLRCLIB` (8s ctx); on `lyrics.ErrNoLyrics` it falls back to
@@ -719,15 +739,19 @@ Queue/Main).
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 
 Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main
-view; `h`/`l` cycle panel focus backward/forward (1→2→3→4, wrapping);
+view; `h`/`l` cycle panel focus backward/forward
+(Library→Playlists→Queue→Main→Lyrics→wrap, skipping Lyrics while hidden);
 `←`/`→` seek -5s/+5s; `space` pause; `n`/`p` next/previous track;
 `↑`/`↓` (also `+`/`=`/`-`) volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
-overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
+overlay; `q`/`ctrl+c` quit; `esc` closes overlay / re-engages a detached lyrics
+peek / pops view stack.
 
 Per panel: `j`/`k` move selection; `ctrl+d`/`ctrl+u` half-page down/up (clamped
 at list edges); `g/G` top/bottom; `enter` activates. A search-results frame
 whose cursor was never deliberately moved resets to the top when the
-songs/albums sections finish arriving.
+songs/albums sections finish arriving. When the **Lyrics** panel is focused these
+same bindings scroll the lyrics instead (unsynced = plain scroll; synced =
+peek-scroll that detaches auto-follow — see the Lyrics panel section).
 Library/Playlists `enter` → load tracks into the main view (see "Library &
 playlists" below for the real-vs-mock split). Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;

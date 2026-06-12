@@ -46,8 +46,9 @@ const (
 	focusPlaylists
 	focusQueue
 	focusMain
+	focusLyrics // only reachable while the lyrics panel is visible (see lyricsVisible)
 
-	focusCount // number of focusable panels, for h/l cycling
+	focusCount // number of focus areas, for the h/l cycle
 )
 
 // overlayKind identifies which modal overlay (if any) is open.
@@ -205,12 +206,21 @@ type Model struct {
 	reimportFn    reimportFunc
 	reimportTried bool
 
-	// Synced-lyrics panel (pure display, never focusable). Resolved lyrics are
-	// cached by videoID so a replay/seek never refetches (the loading entry
-	// dedupes in-flight fetches; results are always recorded — see applyLyrics).
-	// The highlighted line is driven off m.timePos via lyrics.CurrentLine — no
-	// extra event wiring.
+	// Lyrics panel. Resolved lyrics are cached by videoID so a replay/seek never
+	// refetches (the loading entry dedupes in-flight fetches; results are always
+	// recorded — see applyLyrics). When unfocused the highlighted line is driven
+	// off m.timePos via lyrics.CurrentLine — no extra event wiring.
 	lyricsCache map[string]lyricResult
+
+	// Focused-lyrics scroll state, meaningful only while focusLyrics is active.
+	// lyricsScroll is the unsynced top-line offset OR the synced peek-line index;
+	// lyricsDetached marks synced auto-follow as paused by a peek-scroll;
+	// lyricsResumeAt is the playback position (seconds) at which a detached panel
+	// re-engages auto-follow — set on each scroll to timePos+lyricsFollowResumeSec
+	// and checked on later EvTimePos events (see maybeResumeLyrics).
+	lyricsScroll   int
+	lyricsDetached bool
+	lyricsResumeAt float64
 
 	// logoPhase advances on every logoTickMsg; the wordmark colours each letter
 	// from the theme palette at offset (i+logoPhase), so advancing it flows the
@@ -311,8 +321,8 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// FocusedPanel reports the focused panel as "Library", "Playlists", "Queue" or
-// "Main". Exposed as a test/debug surface for asserting focus changes.
+// FocusedPanel reports the focused panel as "Library", "Playlists", "Queue",
+// "Main" or "Lyrics". Exposed as a test/debug surface for asserting focus changes.
 func (m Model) FocusedPanel() string {
 	switch m.focus {
 	case focusLibrary:
@@ -321,10 +331,21 @@ func (m Model) FocusedPanel() string {
 		return "Playlists"
 	case focusQueue:
 		return "Queue"
+	case focusLyrics:
+		return "Lyrics"
 	default:
 		return "Main"
 	}
 }
+
+// LyricsScrollOffset reports the focused lyrics panel's current scroll offset
+// (the unsynced top-line offset, or the synced peek-line index while detached).
+// Exposed for tests asserting the focusable-lyrics scroll behaviour.
+func (m Model) LyricsScrollOffset() int { return m.lyricsScroll }
+
+// LyricsDetached reports whether synced lyrics auto-follow is currently paused
+// by a focused peek-scroll. Exposed for tests.
+func (m Model) LyricsDetached() bool { return m.lyricsDetached }
 
 // ── Messages & commands ─────────────────────────────────────────────────────
 
@@ -698,6 +719,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.search.SetWidth(min(50, m.width-12))
+		// A resize that hides the lyrics panel drops focus back to the main view.
+		m.reconcileLyricsFocus()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -950,6 +973,9 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 	switch ev.Kind {
 	case player.EvTimePos:
 		m.timePos = ev.Float
+		// Idle-timer for the synced lyrics peek (no extra ticker): a detached peek
+		// re-engages auto-follow once playback passes its resume deadline.
+		m.maybeResumeLyrics()
 	case player.EvDuration:
 		if ev.Float > 0 {
 			m.duration = ev.Float
@@ -974,6 +1000,9 @@ func (m Model) handlePlayerEvent(ev player.Event) (tea.Model, tea.Cmd) {
 			m.setError("player: " + ev.Str)
 		}
 	}
+	// Playback may have stopped (EvPlaylistPos -1), hiding the lyrics panel: drop
+	// focus back to the main view if it was on the now-hidden panel.
+	m.reconcileLyricsFocus()
 	return m, tea.Batch(cmd, listenPlayer(m.p))
 }
 
@@ -1008,12 +1037,17 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, k.Focus4):
 		m.setFocus(focusMain)
 	case key.Matches(msg, k.FocusNext):
-		m.setFocus((m.focus + 1) % focusCount)
+		m.cycleFocus(1)
 	case key.Matches(msg, k.FocusPrev):
-		m.setFocus((m.focus + focusCount - 1) % focusCount)
+		m.cycleFocus(-1)
 
 	case key.Matches(msg, k.Esc):
-		if len(m.stack) > 1 {
+		if m.focus == focusLyrics && m.lyricsDetached {
+			// Consume esc: snap synced lyrics back to auto-follow WITHOUT popping
+			// the main-view stack. esc only pops the stack when lyrics is not
+			// focused, or is focused but not detached.
+			m.reengageLyrics()
+		} else if len(m.stack) > 1 {
 			popped := m.stack[len(m.stack)-1]
 			m.stack = m.stack[:len(m.stack)-1]
 			// Popping search results invalidates any still-pending result for
@@ -1030,17 +1064,41 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, k.Up):
-		m.moveCursor(-1)
+		if m.focus == focusLyrics {
+			m.scrollLyrics(-1)
+		} else {
+			m.moveCursor(-1)
+		}
 	case key.Matches(msg, k.Down):
-		m.moveCursor(1)
+		if m.focus == focusLyrics {
+			m.scrollLyrics(1)
+		} else {
+			m.moveCursor(1)
+		}
 	case key.Matches(msg, k.HalfPgUp):
-		m.moveCursor(-m.halfPageRows())
+		if m.focus == focusLyrics {
+			m.scrollLyrics(-m.halfPageRows())
+		} else {
+			m.moveCursor(-m.halfPageRows())
+		}
 	case key.Matches(msg, k.HalfPgDn):
-		m.moveCursor(m.halfPageRows())
+		if m.focus == focusLyrics {
+			m.scrollLyrics(m.halfPageRows())
+		} else {
+			m.moveCursor(m.halfPageRows())
+		}
 	case key.Matches(msg, k.Top):
-		m.cursorToEdge(true)
+		if m.focus == focusLyrics {
+			m.scrollLyricsEdge(true)
+		} else {
+			m.cursorToEdge(true)
+		}
 	case key.Matches(msg, k.Bottom):
-		m.cursorToEdge(false)
+		if m.focus == focusLyrics {
+			m.scrollLyricsEdge(false)
+		} else {
+			m.cursorToEdge(false)
+		}
 
 	case key.Matches(msg, k.Enter):
 		cmd = m.handleEnter()
@@ -1127,6 +1185,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Clearing the queue (or any action that hides the lyrics panel) drops focus
+	// off the now-hidden lyrics panel.
+	m.reconcileLyricsFocus()
 	return m, cmd
 }
 
@@ -1203,7 +1264,37 @@ func (m Model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ── Focus & cursor helpers ──────────────────────────────────────────────────
 
 func (m *Model) setFocus(f focusArea) {
+	// Leaving the lyrics panel re-engages synced auto-follow and resets its
+	// scroll offset (detached state only ever applies while focusLyrics is active).
+	if f != focusLyrics {
+		m.reengageLyrics()
+	}
 	m.focus = f
+}
+
+// cycleFocus moves focus one step in dir (+1 forward, -1 backward) through the
+// panel cycle Library→Playlists→Queue→Main→Lyrics→wrap, skipping the Lyrics
+// panel whenever it is not currently visible.
+func (m *Model) cycleFocus(dir int) {
+	n := int(focusCount)
+	f := int(m.focus)
+	for i := 0; i < n; i++ {
+		f = ((f+dir)%n + n) % n
+		if focusArea(f) == focusLyrics && !m.lyricsVisible() {
+			continue // skip the lyrics panel while it is hidden
+		}
+		break
+	}
+	m.setFocus(focusArea(f))
+}
+
+// reconcileLyricsFocus drops focus back to the main view (re-engaging follow)
+// when the lyrics panel is focused but no longer visible — playback stopped or
+// the terminal got too short.
+func (m *Model) reconcileLyricsFocus() {
+	if m.focus == focusLyrics && !m.lyricsVisible() {
+		m.setFocus(focusMain)
+	}
 }
 
 // listSize returns the cursor pointer and item count for the focused panel.
@@ -1260,15 +1351,21 @@ func (m *Model) markCursorMoved() {
 	}
 }
 
-// halfPageRows is the vim-style ctrl+d/ctrl+u jump distance: half the panel
-// area's height. Short lists simply clamp at their edges. The 1-row header is
-// reserved when shown (>= logoMinTermHeight), plus player bar (6) + hint (1).
-func (m *Model) halfPageRows() int {
+// topAreaHeight is the height of the panel area between the wordmark header (when
+// shown, >= logoMinTermHeight) and the player bar (6) + hint line (1). The left
+// column and the right column (main view + lyrics band) both total this height.
+func (m Model) topAreaHeight() int {
 	logoOff := 0
 	if m.height >= logoMinTermHeight {
 		logoOff = logoHeight
 	}
-	return max(1, (m.height-7-logoOff-2)/2)
+	return m.height - 7 - logoOff
+}
+
+// halfPageRows is the vim-style ctrl+d/ctrl+u jump distance: half the panel
+// area's height. Short lists simply clamp at their edges.
+func (m *Model) halfPageRows() int {
+	return max(1, (m.topAreaHeight()-2)/2)
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
@@ -1490,7 +1587,9 @@ func (m *Model) reflectCurrent(resetTime bool) tea.Cmd {
 	}
 	art := m.refreshArt()
 	if newTrack {
-		// New track: refresh the lyrics panel alongside the cover art.
+		// New track: reset any focused-lyrics scroll/detach and refresh the lyrics
+		// panel alongside the cover art.
+		m.reengageLyrics()
 		return tea.Batch(art, m.ensureLyrics())
 	}
 	return art
@@ -1849,16 +1948,14 @@ func (m Model) View() string {
 	// When the header is hidden the indicator falls through to the status line.
 	ind := m.authIndicator()
 	logo := ""
-	logoOff := 0
 	if m.height >= logoMinTermHeight {
 		logo = renderLogo(m.th, m.width, m.logoPhase, ind)
-		logoOff = logoHeight
 	}
 
 	leftW := clamp(m.width*3/10, 24, 40)
 	mainW := m.width - leftW
-	// player bar (6) + hint line (1) + header row (logoOff)
-	topH := m.height - 7 - logoOff
+	// player bar (6) + hint line (1) + header row when shown
+	topH := m.topAreaHeight()
 
 	// The lyrics panel (when shown) takes a band at the bottom of the RIGHT
 	// column; the main view shrinks to fill the rest. The left column is
@@ -1897,12 +1994,20 @@ func (m Model) View() string {
 		mainBox = panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, mainH, mainFocused)
 	}
 
-	// The non-focusable lyrics panel rides below the main view, above the player
-	// bar, within the right column.
+	// The lyrics panel rides below the main view, above the player bar, within the
+	// right column. It draws with the active border when it is the focused panel;
+	// while focused its scroll/detached state drives what it shows (a focused
+	// peek-scroll detaches synced auto-follow). Unfocused it renders from the top
+	// (unsynced) / the live line (synced), exactly as a pure-display panel.
 	rightCol := mainBox
 	if lyricsH > 0 {
 		st, lines, plain, cur := m.lyricsForView()
-		lyricsBox := panels.LyricsView(m.th, st, lines, plain, cur, mainW, lyricsH)
+		active := m.focus == focusLyrics
+		scroll, detached := 0, false
+		if active {
+			scroll, detached = m.lyricsScroll, m.lyricsDetached
+		}
+		lyricsBox := panels.LyricsView(m.th, st, lines, plain, cur, scroll, detached, active, mainW, lyricsH)
 		rightCol = lipgloss.JoinVertical(lipgloss.Left, mainBox, lyricsBox)
 	}
 
@@ -2021,6 +2126,15 @@ func (m Model) contextHints() []hint {
 	case focusQueue:
 		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Open.Help().Key, "open album"},
 			{k.Remove.Help().Key, "remove"}, {"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}}
+	case focusLyrics:
+		// Synced lyrics peek-scroll (following vs detached); unsynced plain scroll.
+		if r, ok := m.currentLyric(); ok && r.status == lyricResolved && r.found && r.ly.Synced {
+			if m.lyricsDetached {
+				return []hint{{"⏸", "paused"}, {k.Esc.Help().Key, "follow"}}
+			}
+			return []hint{{"▶", "following"}, {"j/k", "peek"}}
+		}
+		return []hint{{"j/k", "scroll"}, {"ctrl+u/d", "page"}}
 	default: // focusMain
 		top := m.stack[len(m.stack)-1]
 		switch {
