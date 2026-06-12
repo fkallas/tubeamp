@@ -293,17 +293,38 @@ func (p *Player) Quit() error  // terminate the daemon: send mpv quit, detach, v
 InnerTube (YT Music private API) client skeleton. POST JSON to
 `https://music.youtube.com/youtubei/v1/<endpoint>?prettyPrint=false` with a
 `context.client` of `{"clientName":"WEB_REMIX","clientVersion":"1.20240101.01.00"}`
-(no API key needed). Authenticated requests add the `Cookie` header plus
+(no API key needed). Authenticated requests add the `Cookie` header (from
+`Auth.Header()`, the live merged set — NOT the frozen load-time value) plus
 `Authorization: SAPISIDHASH <ts>_<sha1hex(ts + " " + SAPISID + " " + origin)>`
 and `X-Origin`/`Origin: https://music.youtube.com`. The `X-Goog-AuthUser` header
 carries the configured account index (`config.AuthUser`, default 0) set via
 `SetAuthUser`, not a hardcoded "0".
 
+Cookie rotation: Google attaches `Set-Cookie` (SIDCC, __Secure-1PSIDCC, sometimes
+__Secure-*PSIDTS) to many responses. After every request `Client.post` folds
+`resp.Cookies()` into the `Auth` cookie jar (new/changed values win; Max-Age=0 or
+expired names dropped). When the set changes, `Auth` re-serializes to the
+canonical `name=value; name=value` header — original order preserved, genuinely
+new names appended — and rewrites the source auth file atomically (temp+rename,
+0600). The merged set is used live for subsequent requests in the same process,
+so a healthy session stays alive instead of decaying from the moment the cookie
+was copied. The jar + file write are mutex-guarded (the daemon makes overlapping
+requests). An `Auth` with no source path updates memory only (never writes).
+
 ```go
 // package ytm
-type Auth struct{ Cookie string } // raw Cookie header value
-func LoadAuth(path string) (*Auth, error) // plain-text file, one line; DataDir()/auth by convention
-func (a *Auth) SAPISID() (string, error)  // parsed from cookie (SAPISID or __Secure-3PAPISID)
+// Auth holds the cookie set and keeps it alive across Google's rotation.
+// The live (possibly rotated) set is maintained internally and mutex-guarded;
+// must be passed by pointer (not copied).
+type Auth struct {
+    Cookie string // raw Cookie header AS ORIGINALLY LOADED (snapshot; use Header() for live)
+    // unexported: ordered live jar, source path, generation counter, mutex
+}
+func LoadAuth(path string) (*Auth, error) // plain-text file, one line; DataDir()/auth by convention;
+                                          // binds path so rotated cookies persist back there
+func (a *Auth) SAPISID() (string, error)  // from the LIVE set (SAPISID or __Secure-3PAPISID); a rotated value takes effect
+func (a *Auth) Header() string            // current Cookie header to send (live merged set, canonical order)
+func (a *Auth) Generation() uint64        // bumps on every absorbed rotation; UI polls it on its auth re-check (no goroutine/channel)
 
 type Client struct{ ... }
 func NewClient(a *Auth) *Client // a may be nil => unauthenticated (search still works)

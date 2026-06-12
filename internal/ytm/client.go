@@ -34,7 +34,8 @@ const (
 type Client struct {
 	hc       *http.Client
 	auth     *Auth
-	authUser int // X-Goog-AuthUser account index (config auth_user)
+	authUser int    // X-Goog-AuthUser account index (config auth_user)
+	baseURL  string // InnerTube base; overridable in tests
 }
 
 // NewClient creates a new Client. a may be nil for unauthenticated access;
@@ -42,8 +43,9 @@ type Client struct {
 // override it with SetAuthUser for people logged into multiple Google accounts.
 func NewClient(a *Auth) *Client {
 	return &Client{
-		hc:   &http.Client{Timeout: 10 * time.Second},
-		auth: a,
+		hc:      &http.Client{Timeout: 10 * time.Second},
+		auth:    a,
+		baseURL: ytmBase,
 	}
 }
 
@@ -73,7 +75,7 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 		return nil, fmt.Errorf("ytm: marshal payload: %w", err)
 	}
 
-	url := ytmBase + "/" + endpoint + "?prettyPrint=false"
+	url := c.baseURL + "/" + endpoint + "?prettyPrint=false"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("ytm: build request: %w", err)
@@ -89,7 +91,7 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 		if err != nil {
 			return nil, fmt.Errorf("ytm: get SAPISID: %w", err)
 		}
-		req.Header.Set("Cookie", c.auth.Cookie)
+		req.Header.Set("Cookie", c.auth.Header())
 		req.Header.Set("Authorization", sapisidHash(sapisid, ytmOrigin, time.Now()))
 		req.Header.Set("X-Goog-AuthUser", strconv.Itoa(c.authUser))
 	}
@@ -99,6 +101,13 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 		return nil, fmt.Errorf("ytm: HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Absorb any rotated cookies Google attached (SIDCC, __Secure-1PSIDCC, …) so
+	// the session stays alive; do this even on non-2xx, since rotation can ride
+	// along an error response. Only when we have credentials to refresh.
+	if c.auth != nil {
+		c.auth.merge(resp.Cookies())
+	}
 
 	// Limit reading to 4 MiB to avoid runaway allocations.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

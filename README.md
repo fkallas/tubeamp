@@ -140,6 +140,13 @@ The header in the logo area then shows your live sign-in state:
   YouTube resolved the request as logged out (almost always a stale cookie)
 - `○ not signed in`  — no auth file
 
+**tubeamp absorbs cookie rotations while running.** Google attaches refreshed
+cookies (`SIDCC`, `__Secure-1PSIDCC`, sometimes `__Secure-*PSIDTS`) to many
+responses. tubeamp merges those refreshes into the live session and writes them
+back to the auth file atomically, so a session that started healthy keeps itself
+alive instead of decaying from the moment you copied the cookie — extending how
+long a sign-in lasts before you have to refresh the file by hand.
+
 **The cookie-rotation gotcha.** Cookies copied from an *active* browser profile
 go stale within hours: Google continuously rotates the `__Secure-*PSIDTS`
 cookies, and once the browser rotates them your copied snapshot is invalidated —
