@@ -510,7 +510,7 @@ func accountInfoCmd(c *ytm.Client) tea.Cmd {
 // client bound to that file (so future rotations persist), and confirms the
 // session with a bounded AccountInfo probe.
 func defaultReimport(browser string, authUser int) reimportMsg {
-	header, err := auth.ImportFromBrowser(browser)
+	header, _, err := auth.ImportFromBrowser(browser)
 	if err != nil {
 		return reimportMsg{browser: browser, err: err}
 	}

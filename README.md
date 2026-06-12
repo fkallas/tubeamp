@@ -152,9 +152,12 @@ or import from another browser.`, or, when the browser is **running**,
 `<browser> is running — cookies copied from a running browser are often stale.
 Quit <browser> completely (Cmd-Q) and run 'tubeamp -auth <browser>' again.`; if
 the confirmation itself could not run — offline, timeout — it says so instead of
-blaming the cookies, and you can check later with `tubeamp -status`). The browser
-you import from is remembered in `config.yaml` (`auth_browser`), and the TUI uses
-it to silently re-import a session that has gone stale (see the rotation note
+blaming the cookies, and you can check later with `tubeamp -status`). A bare
+`tubeamp -auth` (auto) is attributed to the browser whose cookie store actually
+supplied the session, so these messages — including the running-browser check —
+name that concrete browser, never "auto". The browser
+the cookies came from is remembered in `config.yaml` (`auth_browser`), and the TUI
+uses it to silently re-import a session that has gone stale (see the rotation note
 below). A running browser does not *block* the read — tubeamp reads through a
 temporary copy of the (locked) cookie database — but, as above, that copy can be
 stale, so quitting first is what makes the import reliable.

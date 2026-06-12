@@ -14,8 +14,9 @@ import (
 )
 
 // authImport reads the named browser's YouTube cookies and returns the assembled
-// Cookie header. It is a package var so tests can stub the import without driving
-// a real browser store.
+// Cookie header plus the browser whose store supplied it (resolving "auto" to a
+// concrete name). It is a package var so tests can stub the import without
+// driving a real browser store.
 var authImport = auth.ImportFromBrowser
 
 // browserRunning reports whether the target browser is currently running. It is a
@@ -109,10 +110,17 @@ func runAuthImport(out, errOut io.Writer, cfg *config.Config, browser string) in
 		browser = "auto"
 	}
 
-	header, err := authImport(browser)
+	header, source, err := authImport(browser)
 	if err != nil {
 		fmt.Fprintln(errOut, "tubeamp:", err)
 		return 1
+	}
+	// Attribute an "auto" import to the browser whose store actually won, so the
+	// advice below names a real browser (never the literal "auto"), the
+	// running-browser check inspects the right process, and the config remembers a
+	// concrete re-import source.
+	if source != "" {
+		browser = source
 	}
 
 	path := filepath.Join(config.DataDir(), "auth")

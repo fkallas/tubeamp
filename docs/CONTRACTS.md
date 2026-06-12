@@ -454,7 +454,11 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error)
 // ImportFromBrowser reads the YouTube/Google sign-in cookies (domains
 // music.youtube.com / .youtube.com / .google.com) from the named browser's store
 // and assembles the Cookie header. browser ∈ {chrome,chromium,edge,brave,firefox,
-// safari}; "" or "auto" tries every supported store. kooky reads locked SQLite
+// safari}; "" or "auto" tries every supported store. sourceBrowser names the
+// browser whose store actually supplied the header (a concrete lowercase id,
+// never "auto"; "" on error), so the auto path can be attributed — the -auth
+// command uses it for the running check, the advice text, and the persisted
+// cfg.AuthBrowser. kooky reads locked SQLite
 // stores through a temp copy (a running browser does not block it) — but that
 // on-disk snapshot can be STALE: a browser that is open keeps a fresh login in
 // memory + the SQLite WAL, so a signed-in user can still import an anonymous set
@@ -471,7 +475,7 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error)
 // session living only on a non-default profile is still used when no default
 // profile carries one. This selection (pickStoreHeader, over an injectable
 // storeReader interface) is unit-tested with fake stores.
-func ImportFromBrowser(browser string) (cookieHeader string, err error)
+func ImportFromBrowser(browser string) (cookieHeader, sourceBrowser string, err error)
 
 // IsBrowserRunning reports whether the named browser process is running
 // (pgrep on darwin/linux; checks "Google Chrome"/"firefox"/"Brave Browser"/
@@ -722,8 +726,12 @@ browses never run from tests. Mock data lives in `internal/ui/mock.go`.
 
 `auth.go`: `-auth <browser>` runs the one-command browser import and exits (it
 does not open the TUI or touch the daemon). It imports via `auth.ImportFromBrowser`
-(stubbable `authImport` package var), writes the auth file with the shared
-`ytm.WriteAuthFile`, persists the browser as `cfg.AuthBrowser`, then confirms with
+(stubbable `authImport` package var) and ATTRIBUTES the import to the
+`sourceBrowser` it reports — so a bare `-auth` (auto) resolves to the concrete
+browser whose store won, and every downstream use (the running check, the advice
+text, the persisted `cfg.AuthBrowser`) names that browser, never the literal
+"auto". It writes the auth file with the shared
+`ytm.WriteAuthFile`, persists the resolved browser as `cfg.AuthBrowser`, then confirms with
 a bounded `AccountInfo` (stubbable `confirmSignIn` var, which returns the probe
 error distinctly) — printing `signed in as <name>`, or the anonymous advice from
 the pure `anonymousAdvice(browser, running, signedIn)` selector, or — when only

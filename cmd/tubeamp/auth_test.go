@@ -13,6 +13,8 @@ import (
 
 // stubAuthImport replaces the browser import and sign-in confirmation with canned
 // results so the -auth flow can be tested without a browser or the network. The
+// stub echoes the requested browser back as the import source (the real import
+// resolves "auto" to a concrete browser; see stubAuthImportSource for that). The
 // originals are restored on cleanup.
 func stubAuthImport(t *testing.T, header string, importErr error, name string, signedIn bool) {
 	t.Helper()
@@ -23,8 +25,18 @@ func stubAuthImport(t *testing.T, header string, importErr error, name string, s
 func stubAuthImportConfirmErr(t *testing.T, header string, importErr error, name string, signedIn bool, confirmErr error) {
 	t.Helper()
 	origImport, origConfirm := authImport, confirmSignIn
-	authImport = func(string) (string, error) { return header, importErr }
+	authImport = func(browser string) (string, string, error) { return header, browser, importErr }
 	confirmSignIn = func(*config.Config) (string, bool, error) { return name, signedIn, confirmErr }
+	t.Cleanup(func() { authImport, confirmSignIn = origImport, origConfirm })
+}
+
+// stubAuthImportSource is stubAuthImport with an explicit import source, for
+// exercising the "auto" path where the resolved source differs from the request.
+func stubAuthImportSource(t *testing.T, header, source string, name string, signedIn bool) {
+	t.Helper()
+	origImport, origConfirm := authImport, confirmSignIn
+	authImport = func(string) (string, string, error) { return header, source, nil }
+	confirmSignIn = func(*config.Config) (string, bool, error) { return name, signedIn, nil }
 	t.Cleanup(func() { authImport, confirmSignIn = origImport, origConfirm })
 }
 
@@ -137,6 +149,47 @@ func TestRunAuthImport_anonymousRunning(t *testing.T) {
 	}
 	if strings.Contains(got, "are you logged into") {
 		t.Errorf("stdout = %q: the running-browser case must replace the are-you-logged-in line", got)
+	}
+}
+
+// TestRunAuthImport_autoAttributesSource: the default bare `-auth` (auto) path
+// must attribute the import to the browser whose store actually supplied the
+// cookies — the running check inspects THAT browser, the advice names it (never
+// the literal "auto"), and config remembers it as the re-import source. This is
+// the regression test for the running-browser advice never firing on auto.
+func TestRunAuthImport_autoAttributesSource(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	stubAuthImportSource(t, "SAPISID=x", "chrome", "", false)
+
+	var checked []string
+	origRunning := browserRunning
+	browserRunning = func(b string) bool {
+		checked = append(checked, b)
+		return b == "chrome" // only the attributed source is "running"
+	}
+	t.Cleanup(func() { browserRunning = origRunning })
+
+	cfg := config.Default()
+	var out, errOut bytes.Buffer
+	if code := runAuthImport(&out, &errOut, cfg, "auto"); code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr=%q)", code, errOut.String())
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "chrome is running") || !strings.Contains(got, "Quit chrome") {
+		t.Errorf("stdout = %q, want the quit-and-retry advice attributed to chrome", got)
+	}
+	if strings.Contains(got, "auto") {
+		t.Errorf("stdout = %q: must never interpolate the literal \"auto\" as a browser name", got)
+	}
+	if len(checked) != 1 || checked[0] != "chrome" {
+		t.Errorf("browserRunning checked %v, want exactly [chrome] (the attributed source)", checked)
+	}
+	if cfg.AuthBrowser != "chrome" {
+		t.Errorf("cfg.AuthBrowser = %q, want the resolved source chrome (not auto)", cfg.AuthBrowser)
 	}
 }
 

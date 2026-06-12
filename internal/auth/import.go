@@ -134,11 +134,13 @@ func AssembleCookieHeader(cookies []*http.Cookie) (string, error) {
 
 // storeReader is the slice of a cookie store's behaviour the profile selector
 // needs: assemble the store's Cookie header (ErrNoSAPISID when it holds no
-// session) and report whether it is the browser's default profile. kooky's
-// CookieStore satisfies it via kookyStore; tests inject fakes.
+// session), report whether it is the browser's default profile, and name the
+// browser it belongs to (so the "auto" import can attribute the winning store).
+// kooky's CookieStore satisfies it via kookyStore; tests inject fakes.
 type storeReader interface {
 	header(ctx context.Context) (string, error)
 	isDefaultProfile() bool
+	browserName() string
 }
 
 // kookyStore adapts a kooky.CookieStore to storeReader. It does not close the
@@ -154,22 +156,27 @@ func (k *kookyStore) header(ctx context.Context) (string, error) {
 
 func (k *kookyStore) isDefaultProfile() bool { return k.st.IsDefaultProfile() }
 
+func (k *kookyStore) browserName() string { return k.browser }
+
 // pickStoreHeader assembles a Cookie header from the first usable store among
 // candidates, preferring the browser's DEFAULT profile when several profiles
 // carry a session. This stops a stale secondary profile (e.g. an old, empty
 // Firefox *.default beside the active *.default-release that profiles.ini marks
-// Default) from winning just because kooky iterated it first.
+// Default) from winning just because kooky iterated it first. The winning
+// store's browser name is returned alongside the header so an "auto" import can
+// attribute the session to a concrete browser.
 //
 // Selection: the first default-profile store that yields a SAPISID wins
 // outright; otherwise the first non-default store with a SAPISID is used (so a
 // session living only on a secondary profile is still found). When no store
 // holds a session, a real read error (e.g. a macOS Keychain denial) is surfaced
 // over the bare ErrNoSAPISID.
-func pickStoreHeader(ctx context.Context, stores []storeReader) (string, error) {
+func pickStoreHeader(ctx context.Context, stores []storeReader) (header, browser string, err error) {
 	var (
-		fallback     string
-		haveFallback bool
-		lastErr      error
+		fallback        string
+		fallbackBrowser string
+		haveFallback    bool
+		lastErr         error
 	)
 	for _, s := range stores {
 		header, err := s.header(ctx)
@@ -180,26 +187,29 @@ func pickStoreHeader(ctx context.Context, stores []storeReader) (string, error) 
 			continue
 		}
 		if s.isDefaultProfile() {
-			return header, nil
+			return header, s.browserName(), nil
 		}
 		if !haveFallback {
-			fallback, haveFallback = header, true
+			fallback, fallbackBrowser, haveFallback = header, s.browserName(), true
 		}
 	}
 	if haveFallback {
-		return fallback, nil
+		return fallback, fallbackBrowser, nil
 	}
 	if lastErr != nil {
-		return "", lastErr
+		return "", "", lastErr
 	}
-	return "", ErrNoSAPISID
+	return "", "", ErrNoSAPISID
 }
 
 // ImportFromBrowser reads the YouTube/Google sign-in cookies from the named
 // browser's local cookie store and assembles them into the Cookie header tubeamp
 // sends. browser is one of "chrome", "chromium", "edge", "brave", "firefox" or
 // "safari"; "" or "auto" tries every supported store and returns the first that
-// yields a usable (SAPISID-bearing) set.
+// yields a usable (SAPISID-bearing) set. sourceBrowser names the browser whose
+// store actually supplied the header (lowercase id, never "auto"; "" on error),
+// so callers on the auto path can attribute the session — e.g. the -auth command
+// checks whether THAT browser is running and names it in its advice.
 //
 // When a browser exposes several profiles (e.g. Firefox's *.default and
 // *.default-release), the store whose cookie DB actually holds a session is
@@ -220,13 +230,13 @@ func pickStoreHeader(ctx context.Context, stores []storeReader) (string, error) 
 // It returns ErrNoStore when no store is found for the requested browser and
 // ErrNoSAPISID (or the more informative read error) when stores were found but
 // none held a signed-in session.
-func ImportFromBrowser(browser string) (string, error) {
+func ImportFromBrowser(browser string) (cookieHeader, sourceBrowser string, err error) {
 	want := strings.ToLower(strings.TrimSpace(browser))
 	if want == "auto" {
 		want = ""
 	}
 	if want != "" && !supportedBrowsers[want] {
-		return "", fmt.Errorf("auth: unsupported browser %q (want chrome, chromium, edge, brave, firefox or safari)", browser)
+		return "", "", fmt.Errorf("auth: unsupported browser %q (want chrome, chromium, edge, brave, firefox or safari)", browser)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -263,9 +273,9 @@ func ImportFromBrowser(browser string) (string, error) {
 
 	if len(candidates) == 0 {
 		if want != "" {
-			return "", fmt.Errorf("%w for %q (is it installed?)", ErrNoStore, want)
+			return "", "", fmt.Errorf("%w for %q (is it installed?)", ErrNoStore, want)
 		}
-		return "", fmt.Errorf("%w: no supported browser detected", ErrNoStore)
+		return "", "", fmt.Errorf("%w: no supported browser detected", ErrNoStore)
 	}
 	return pickStoreHeader(ctx, candidates)
 }

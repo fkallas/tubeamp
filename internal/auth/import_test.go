@@ -109,22 +109,25 @@ func TestRelevantDomain(t *testing.T) {
 // TestImportFromBrowser_unsupported asserts a bogus browser name is rejected
 // without touching any store.
 func TestImportFromBrowser_unsupported(t *testing.T) {
-	if _, err := ImportFromBrowser("netscape4"); err == nil {
+	if _, _, err := ImportFromBrowser("netscape4"); err == nil {
 		t.Error("expected error for unsupported browser, got nil")
 	}
 }
 
 // fakeStore is an injected storeReader: it assembles a header from a fixed cookie
-// set (so the selector's profile logic can be tested without a real browser) and
-// reports whether it is a browser's default profile. A non-nil readErr simulates
-// a store-level read failure (e.g. a Keychain denial).
+// set (so the selector's profile logic can be tested without a real browser),
+// reports whether it is a browser's default profile, and names its browser. A
+// non-nil readErr simulates a store-level read failure (e.g. a Keychain denial).
 type fakeStore struct {
 	cookies   []*http.Cookie
 	isDefault bool
+	name      string
 	readErr   error
 }
 
 func (f fakeStore) isDefaultProfile() bool { return f.isDefault }
+
+func (f fakeStore) browserName() string { return f.name }
 
 func (f fakeStore) header(context.Context) (string, error) {
 	if f.readErr != nil {
@@ -139,19 +142,22 @@ func sapisidSet(value string) []*http.Cookie {
 
 // TestPickStoreHeader_skipsEmpty: among several candidate profiles, the one whose
 // cookie DB actually carries a SAPISID is chosen, not an empty stale profile that
-// happens to be iterated first.
+// happens to be iterated first. The winning store's browser is attributed.
 func TestPickStoreHeader_skipsEmpty(t *testing.T) {
 	stores := []storeReader{
-		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}},  // no SAPISID
-		fakeStore{cookies: sapisidSet("real")},                  // the real session
-		fakeStore{cookies: []*http.Cookie{cookie("PREF", "p")}}, // another empty one
+		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}, name: "chrome"},  // no SAPISID
+		fakeStore{cookies: sapisidSet("real"), name: "firefox"},                 // the real session
+		fakeStore{cookies: []*http.Cookie{cookie("PREF", "p")}, name: "safari"}, // another empty one
 	}
-	got, err := pickStoreHeader(context.Background(), stores)
+	got, browser, err := pickStoreHeader(context.Background(), stores)
 	if err != nil {
 		t.Fatalf("pickStoreHeader: %v", err)
 	}
 	if !strings.Contains(got, "SAPISID=real") {
 		t.Errorf("header = %q, want the SAPISID-bearing store", got)
+	}
+	if browser != "firefox" {
+		t.Errorf("browser = %q, want firefox (the store that supplied the session)", browser)
 	}
 }
 
@@ -170,7 +176,7 @@ func TestPickStoreHeader_prefersDefaultProfile(t *testing.T) {
 		{"stale-first", []storeReader{stale, active}},
 		{"default-first", []storeReader{active, stale}},
 	} {
-		got, err := pickStoreHeader(context.Background(), tc.stores)
+		got, _, err := pickStoreHeader(context.Background(), tc.stores)
 		if err != nil {
 			t.Fatalf("%s: pickStoreHeader: %v", tc.name, err)
 		}
@@ -187,7 +193,7 @@ func TestPickStoreHeader_nonDefaultFallback(t *testing.T) {
 		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}, isDefault: true}, // default, but empty
 		fakeStore{cookies: sapisidSet("secondary")},                             // session on a secondary profile
 	}
-	got, err := pickStoreHeader(context.Background(), stores)
+	got, _, err := pickStoreHeader(context.Background(), stores)
 	if err != nil {
 		t.Fatalf("pickStoreHeader: %v", err)
 	}
@@ -203,7 +209,7 @@ func TestPickStoreHeader_noSession(t *testing.T) {
 		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}},
 		fakeStore{cookies: []*http.Cookie{cookie("PREF", "p")}},
 	}
-	if _, err := pickStoreHeader(context.Background(), stores); !errors.Is(err, ErrNoSAPISID) {
+	if _, _, err := pickStoreHeader(context.Background(), stores); !errors.Is(err, ErrNoSAPISID) {
 		t.Errorf("err = %v, want ErrNoSAPISID", err)
 	}
 }
@@ -217,7 +223,7 @@ func TestPickStoreHeader_readErrorSurfaced(t *testing.T) {
 		fakeStore{readErr: wantErr},
 		fakeStore{cookies: []*http.Cookie{cookie("YSC", "y")}}, // no session
 	}
-	_, err := pickStoreHeader(context.Background(), stores)
+	_, _, err := pickStoreHeader(context.Background(), stores)
 	if !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want the read error", err)
 	}
@@ -230,7 +236,7 @@ func TestPickStoreHeader_readErrorButSessionWins(t *testing.T) {
 		fakeStore{readErr: errors.New("locked")},
 		fakeStore{cookies: sapisidSet("ok")},
 	}
-	got, err := pickStoreHeader(context.Background(), stores)
+	got, _, err := pickStoreHeader(context.Background(), stores)
 	if err != nil {
 		t.Fatalf("pickStoreHeader: %v", err)
 	}
@@ -273,12 +279,15 @@ func TestImportFromBrowser_live(t *testing.T) {
 		t.Skip("set TUBEAMP_LIVE_IMPORT=1 (and optionally TUBEAMP_LIVE_IMPORT_BROWSER) to run the real browser import")
 	}
 	browser := os.Getenv("TUBEAMP_LIVE_IMPORT_BROWSER") // "" => auto
-	header, err := ImportFromBrowser(browser)
+	header, source, err := ImportFromBrowser(browser)
 	if err != nil {
 		t.Fatalf("ImportFromBrowser(%q): %v", browser, err)
 	}
 	// Never print the header — it is a live credential. Only assert structure.
 	if !strings.Contains(header, "SAPISID") {
 		t.Error("imported header is missing a SAPISID cookie")
+	}
+	if source == "" || source == "auto" {
+		t.Errorf("sourceBrowser = %q, want a concrete browser id", source)
 	}
 }
