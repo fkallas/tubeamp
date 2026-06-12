@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -275,97 +274,6 @@ func TestRequestDeviceCode_ok(t *testing.T) {
 
 // ---- Client OAuth post path ----
 
-// TestClient_OAuthPost_setsBearerAndRefreshes verifies that an expired OAuth
-// token is refreshed before the InnerTube request, the request carries
-// Authorization: Bearer <new access token> (and the OAuth User-Agent, no cookie
-// or SAPISIDHASH), and the refreshed token is persisted.
-func TestClient_OAuthPost_setsBearerAndRefreshes(t *testing.T) {
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		if r.PostForm.Get("grant_type") != oauthGrantRefresh {
-			t.Errorf("token grant_type = %q, want refresh", r.PostForm.Get("grant_type"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"fresh-token","expires_in":3600,"token_type":"Bearer"}`))
-	}))
-	defer tokenSrv.Close()
-	setOAuthEndpoints(t, "", tokenSrv.URL)
-
-	var gotAuth, gotUA, gotCookie string
-	innerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotUA = r.Header.Get("User-Agent")
-		gotCookie = r.Header.Get("Cookie")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`)) // valid JSON; AccountInfo => logged-out, no error
-	}))
-	defer innerSrv.Close()
-
-	tmp := t.TempDir()
-	oauthPath := filepath.Join(tmp, "oauth.json")
-	tok := &OAuthToken{AccessToken: "stale", RefreshToken: "ref", TokenType: "Bearer", ExpiresAt: time.Now().Unix() - 100}
-
-	c := NewClient(nil)
-	c.baseURL = innerSrv.URL
-	c.UseOAuth(tok, OAuthCreds{ClientID: "cid", ClientSecret: "csecret"}, oauthPath)
-
-	if _, _, err := c.AccountInfo(context.Background()); err != nil {
-		t.Fatalf("AccountInfo: %v", err)
-	}
-	if gotAuth != "Bearer fresh-token" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer fresh-token")
-	}
-	if gotCookie != "" {
-		t.Errorf("Cookie header set in OAuth mode: %q", gotCookie)
-	}
-	if !strings.Contains(gotUA, "Firefox") || strings.Contains(gotUA, "Cobalt") {
-		t.Errorf("User-Agent = %q, want the OAuth InnerTube UA (Firefox, no Cobalt)", gotUA)
-	}
-	// The refreshed token was persisted.
-	saved, err := LoadOAuthToken(oauthPath)
-	if err != nil {
-		t.Fatalf("LoadOAuthToken: %v", err)
-	}
-	if saved.AccessToken != "fresh-token" {
-		t.Errorf("persisted AccessToken = %q, want fresh-token", saved.AccessToken)
-	}
-}
-
-// TestClient_OAuthPost_noRefreshWhenValid verifies a still-valid token is used
-// as-is (no call to the token endpoint).
-func TestClient_OAuthPost_noRefreshWhenValid(t *testing.T) {
-	tokenHits := 0
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tokenHits++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"should-not-be-used","expires_in":3600}`))
-	}))
-	defer tokenSrv.Close()
-	setOAuthEndpoints(t, "", tokenSrv.URL)
-
-	var gotAuth string
-	innerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer innerSrv.Close()
-
-	tok := &OAuthToken{AccessToken: "valid", RefreshToken: "ref", TokenType: "Bearer", ExpiresAt: time.Now().Unix() + 3600}
-	c := NewClient(nil)
-	c.baseURL = innerSrv.URL
-	c.UseOAuth(tok, OAuthCreds{ClientID: "cid", ClientSecret: "csecret"}, "")
-
-	if _, _, err := c.AccountInfo(context.Background()); err != nil {
-		t.Fatalf("AccountInfo: %v", err)
-	}
-	if tokenHits != 0 {
-		t.Errorf("token endpoint hit %d times, want 0 (token still valid)", tokenHits)
-	}
-	if gotAuth != "Bearer valid" {
-		t.Errorf("Authorization = %q, want Bearer valid", gotAuth)
-	}
-}
-
 // TestClient_CookiePost_unchanged verifies cookie mode still signs with the
 // Cookie header + SAPISIDHASH and never sends a Bearer token.
 func TestClient_CookiePost_unchanged(t *testing.T) {
@@ -407,35 +315,5 @@ func TestTokenResponse_decodes(t *testing.T) {
 	}
 	if tr.AccessToken != "a" || tr.ExpiresIn != 3599 || tr.RefreshToken != "r" {
 		t.Errorf("decoded = %+v", tr)
-	}
-}
-
-// TestUseOAuth_concurrentModeReads exercises UseOAuth racing the lock-guarded
-// mode reads (UsingOAuth / Authenticated, the same path post()'s dispatch
-// takes). Run under -race this guards the oauth pointer against unsynchronized
-// access if a live client is ever switched to OAuth mid-session (e.g. a future
-// in-TUI login).
-func TestUseOAuth_concurrentModeReads(t *testing.T) {
-	c := NewClient(nil)
-	tok := &OAuthToken{AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().Unix() + 3600}
-
-	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				_ = c.UsingOAuth()
-				_ = c.Authenticated()
-			}
-		}()
-	}
-	for j := 0; j < 200; j++ {
-		c.UseOAuth(tok, OAuthCreds{ClientID: "cid", ClientSecret: "cs"}, "")
-	}
-	wg.Wait()
-
-	if !c.UsingOAuth() || !c.Authenticated() {
-		t.Error("client should report OAuth mode after UseOAuth")
 	}
 }

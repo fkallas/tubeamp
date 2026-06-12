@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"image"
 	"strings"
 	"testing"
@@ -1355,70 +1354,6 @@ func TestAutoRefresh_skippedWithoutAuthFile(t *testing.T) {
 	_, cmd := m.Update(accountInfoMsg{signedIn: false})
 	if cmd != nil {
 		t.Error("no reimport Cmd should fire without an auth file present")
-	}
-}
-
-// TestAutoRefresh_skippedInOAuthMode: the browser cookie re-import must never
-// fire for an OAuth client, even with auth_browser remembered from an earlier
-// cookie setup — a successful re-import would silently swap the OAuth Bearer
-// client for a cookie client, inverting the OAuth-takes-precedence order.
-func TestAutoRefresh_skippedInOAuthMode(t *testing.T) {
-	called := false
-	m := newTestModel(t, 120, 40)
-	c := ytm.NewClient(nil)
-	c.UseOAuth(&ytm.OAuthToken{AccessToken: "at", RefreshToken: "rt"}, ytm.OAuthCreds{}, "")
-	m.c = c
-	m.hasAuth = c.Authenticated()
-	m.cfg.AuthBrowser = "chrome" // left over from a previous cookie setup
-	m.reimportFn = func(string, int) reimportMsg { called = true; return reimportMsg{} }
-
-	_, cmd := m.Update(accountInfoMsg{signedIn: false})
-	if cmd != nil {
-		t.Error("an anonymous OAuth session must not fire the cookie re-import")
-	}
-	if called {
-		t.Error("reimportFn must not run in OAuth mode")
-	}
-}
-
-// TestInvalidGrantPromptsRelogin: a revoked OAuth refresh token (invalid_grant,
-// surfaced as a wrapped *ytm.OAuthError) must prompt `tubeamp -login` — on the
-// startup probe (which also downgrades the indicator) and on library loads —
-// instead of a generic raw-error toast.
-func TestInvalidGrantPromptsRelogin(t *testing.T) {
-	revoked := fmt.Errorf("ytm: refresh oauth token: %w",
-		&ytm.OAuthError{Code: "invalid_grant", Description: "Token has been expired or revoked."})
-
-	m := newTestModel(t, 120, 40)
-	c := ytm.NewClient(nil)
-	c.UseOAuth(&ytm.OAuthToken{AccessToken: "at", RefreshToken: "rt"}, ytm.OAuthCreds{}, "")
-	m.c = c
-	m.hasAuth = c.Authenticated()
-
-	// Startup probe: prompt + downgraded indicator (with the OAuth wording).
-	m = send(m, accountInfoMsg{err: revoked})
-	if !strings.Contains(m.status, "tubeamp -login") || !m.statusErr {
-		t.Fatalf("status = %q (err=%v), want the re-login prompt", m.status, m.statusErr)
-	}
-	if !m.authChecked || m.authSignedIn {
-		t.Errorf("indicator not downgraded: checked=%v signedIn=%v", m.authChecked, m.authSignedIn)
-	}
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "○ anonymous — run tubeamp -login") {
-		t.Errorf("view missing the OAuth anonymous indicator")
-	}
-
-	// A failing library load shows the same prompt, not the raw oauth error.
-	m.libGen = 1
-	m = send(m, libTracksMsg{gen: 1, title: "Liked Songs", err: revoked})
-	if !strings.Contains(m.status, "tubeamp -login") || strings.Contains(m.status, "invalid_grant") {
-		t.Errorf("library-load status = %q, want the re-login prompt", m.status)
-	}
-
-	// Other failures keep their descriptive text.
-	m.libGen = 2
-	m = send(m, libTracksMsg{gen: 2, title: "Liked Songs", err: errors.New("boom")})
-	if !strings.Contains(m.status, "could not load Liked Songs: boom") {
-		t.Errorf("non-oauth failure status = %q, want the generic text", m.status)
 	}
 }
 

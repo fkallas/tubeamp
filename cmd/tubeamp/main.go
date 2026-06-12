@@ -133,10 +133,10 @@ func run(cfg *config.Config, themeOverride string) error {
 		defer p.Close()
 	}
 
-	// Auth. OAuth (durable, auto-refreshing) is preferred when its credentials
-	// are configured and a token exists; otherwise fall back to the cookie auth
-	// file. A missing/unreadable source simply means unauthenticated — the client
-	// is still constructed (search works without credentials).
+	// InnerTube client (search + playback resolution). It is cookie-authenticated
+	// when an auth file is present, else anonymous — NEVER OAuth: Google's
+	// youtubei API rejects OAuth bearer tokens. A missing/unreadable cookie file
+	// simply means unauthenticated (search still works).
 	client := buildClient(cfg)
 	client.SetAuthUser(cfg.AuthUser)
 
@@ -150,21 +150,13 @@ func run(cfg *config.Config, themeOverride string) error {
 	return nil
 }
 
-// buildClient constructs the InnerTube client for the TUI, preferring OAuth.
-// When oauth_client_id/secret are configured AND a token file (oauth.json)
-// loads, it returns an OAuth Bearer client that refreshes (and persists) its
-// token automatically. Otherwise it falls back to the cookie auth file, and to
-// an unauthenticated client when neither is present. The caller still calls
-// SetAuthUser (it is a no-op for OAuth requests).
+// buildClient constructs the InnerTube client for the TUI. InnerTube does not
+// accept OAuth bearer tokens (Google's youtubei API rejects them), so this
+// client is cookie-authenticated when an auth file is present, else anonymous —
+// never OAuth. OAuth instead powers the Data API library client (see commit
+// wiring in run/ui). A missing/unreadable cookie file yields an unauthenticated
+// client (search still works).
 func buildClient(cfg *config.Config) *ytm.Client {
-	if cfg.OAuthClientID != "" && cfg.OAuthClientSecret != "" {
-		path := filepath.Join(config.DataDir(), "oauth.json")
-		if tok, err := ytm.LoadOAuthToken(path); err == nil {
-			c := ytm.NewClient(nil)
-			c.UseOAuth(tok, ytm.OAuthCreds{ClientID: cfg.OAuthClientID, ClientSecret: cfg.OAuthClientSecret}, path)
-			return c
-		}
-	}
 	var auth *ytm.Auth
 	if a, aerr := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth")); aerr == nil {
 		auth = a

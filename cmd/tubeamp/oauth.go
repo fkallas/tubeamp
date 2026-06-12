@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fkallas/tubeamp/internal/config"
+	"github.com/fkallas/tubeamp/internal/ytdata"
 	"github.com/fkallas/tubeamp/internal/ytm"
 )
 
@@ -19,16 +20,22 @@ var (
 	oauthRequestDeviceCode = ytm.RequestDeviceCode
 	oauthPollToken         = ytm.PollToken
 
-	// oauthConfirmSignIn probes the account behind a freshly minted token using a
-	// throwaway Bearer client. A non-nil error means the probe itself failed
-	// (network/timeout) — the sign-in state is unknown, not confirmed anonymous.
+	// oauthConfirmSignIn probes the account behind a freshly minted token via the
+	// official YouTube Data API (ytdata.Account → channels?mine=true) — the call
+	// that actually works with an OAuth token, unlike InnerTube which rejects it.
+	// A non-nil error means the probe itself failed (network/timeout) — the
+	// sign-in state is unknown, not confirmed anonymous. A successful call with a
+	// channel name is signed-in; an empty name (no channel on the account) is
+	// reported as not-resolved so -login does not print "signed in as ".
 	oauthConfirmSignIn = func(cfg *config.Config, tok *ytm.OAuthToken) (name string, signedIn bool, err error) {
-		c := ytm.NewClient(nil)
-		c.UseOAuth(tok, oauthCredsFrom(cfg), "")
-		c.SetAuthUser(cfg.AuthUser)
+		c := ytdata.NewClient(tok, oauthCredsFrom(cfg), "")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return c.AccountInfo(ctx)
+		name, err = c.Account(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		return name, name != "", nil
 	}
 )
 

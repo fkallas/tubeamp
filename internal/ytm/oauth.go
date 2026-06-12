@@ -31,10 +31,6 @@ const (
 	// oauthCredUA is the User-Agent ytmusicapi sends with the device-code and
 	// token requests (OAUTH_USER_AGENT = USER_AGENT + " Cobalt/Version").
 	oauthCredUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0 Cobalt/Version"
-
-	// oauthInnerTubeUA is the User-Agent ytmusicapi sends on InnerTube requests
-	// while in OAuth mode (its plain USER_AGENT, without the Cobalt suffix).
-	oauthInnerTubeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0"
 )
 
 // Device-flow endpoints and the HTTP client used for the OAuth credential

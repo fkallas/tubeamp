@@ -605,14 +605,6 @@ func (m *Model) maybeReimportCmd() tea.Cmd {
 	if m.reimportTried || m.cfg == nil || m.cfg.AuthBrowser == "" || !m.hasAuth {
 		return nil
 	}
-	// A browser re-import refreshes COOKIE sessions only. An OAuth client must
-	// never be silently swapped for a cookie client (OAuth takes precedence
-	// over cookie auth), even when auth_browser is remembered from an earlier
-	// cookie setup; a dead OAuth session is fixed by `tubeamp -login`, which
-	// the invalid_grant paths prompt for.
-	if m.c != nil && m.c.UsingOAuth() {
-		return nil
-	}
 	m.reimportTried = true
 	fn := m.reimportFn
 	browser := m.cfg.AuthBrowser
@@ -1961,12 +1953,10 @@ func requestErrText(prefix string, err error) string {
 
 // authIndicator returns the styled sign-in status shown right-aligned on the
 // wordmark header row (or the status line when the header is hidden on the
-// shortest terminal), or "" before the one-shot AccountInfo check has
-// resolved. Signed in => "● <name>" in
-// PlayingStyle; credentials that resolve anonymous => a mode-specific Muted
-// hint ("○ anonymous — run tubeamp -login" for a dead OAuth session,
-// "○ anonymous — cookie stale? see README" for a stale cookie); no credentials
-// at all => "○ not signed in" in Muted.
+// shortest terminal), or "" before the one-shot AccountInfo check has resolved.
+// Signed in => "● <name>" in PlayingStyle; credentials that resolve anonymous =>
+// "○ anonymous — cookie stale? see README" in Muted; no credentials at all =>
+// "○ not signed in" in Muted.
 func (m Model) authIndicator() string {
 	if !m.authChecked {
 		return ""
@@ -1979,9 +1969,6 @@ func (m Model) authIndicator() string {
 		return m.th.PlayingStyle().Render("● " + name)
 	}
 	if m.hasAuth {
-		if m.c != nil && m.c.UsingOAuth() {
-			return m.th.Muted().Render("○ anonymous — run tubeamp -login")
-		}
 		return m.th.Muted().Render("○ anonymous — cookie stale? see README")
 	}
 	return m.th.Muted().Render("○ not signed in")
