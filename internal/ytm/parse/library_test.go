@@ -48,10 +48,94 @@ func TestLibraryPlaylists_fixture(t *testing.T) {
 }
 
 func TestLibraryPlaylists_notSignedIn(t *testing.T) {
-	// A logged-out page has no gridRenderer => ErrNotSignedIn (not empty success).
+	// No logged_in marker and no gridRenderer => ErrNotSignedIn (not empty success).
 	_, err := LibraryPlaylists([]byte(`{"contents":{}}`))
 	if !errors.Is(err, ErrNotSignedIn) {
 		t.Fatalf("err = %v, want ErrNotSignedIn", err)
+	}
+}
+
+func TestLibraryPlaylists_loggedOutFixture(t *testing.T) {
+	// Trimmed live anonymous capture: logged_in "0" marker plus a sign-in
+	// messageRenderer instead of the playlist grid.
+	data, err := os.ReadFile("testdata/library_playlists_logged_out.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	_, err = LibraryPlaylists(data)
+	if !errors.Is(err, ErrNotSignedIn) {
+		t.Fatalf("err = %v, want ErrNotSignedIn", err)
+	}
+}
+
+func TestLibraryPlaylists_loggedOutMarkerWinsOverStrayGrid(t *testing.T) {
+	// The library browse is per-account: with the logged_in "0" marker, even a
+	// response carrying some unrelated grid must classify as not-signed-in
+	// rather than parse bogus "playlists".
+	raw := []byte(`{
+		"responseContext": {"serviceTrackingParams": [
+			{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "0"}]}
+		]},
+		"contents": {"gridRenderer": {"items": [
+			{"musicTwoRowItemRenderer": {"title": {"runs": [{
+				"text": "Some Promo",
+				"navigationEndpoint": {"browseEndpoint": {"browseId": "VLPLwhatever"}}
+			}]}}}
+		]}}
+	}`)
+	_, err := LibraryPlaylists(raw)
+	if !errors.Is(err, ErrNotSignedIn) {
+		t.Fatalf("err = %v, want ErrNotSignedIn (logged-out marker must win)", err)
+	}
+}
+
+func TestLibraryPlaylists_emptyButSignedIn(t *testing.T) {
+	// logged_in "1" with no grid is a signed-in empty library (e.g. an
+	// empty-state message page), not ErrNotSignedIn.
+	raw := []byte(`{
+		"responseContext": {"serviceTrackingParams": [
+			{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "1"}]}
+		]},
+		"contents": {}
+	}`)
+	pls, err := LibraryPlaylists(raw)
+	if err != nil {
+		t.Fatalf("LibraryPlaylists on signed-in empty page: %v", err)
+	}
+	if len(pls) != 0 {
+		t.Errorf("got %d playlists, want 0", len(pls))
+	}
+}
+
+func TestLibraryPlaylists_skipsNonPlaylistTiles(t *testing.T) {
+	// An album tile (MUSIC_PAGE_TYPE_ALBUM, MPREb id) in the grid must not
+	// parse as a playlist.
+	raw := []byte(`{"contents": {"gridRenderer": {"items": [
+		{"musicTwoRowItemRenderer": {"title": {"runs": [{
+			"text": "Some Album",
+			"navigationEndpoint": {"browseEndpoint": {
+				"browseId": "MPREb_abc123",
+				"browseEndpointContextSupportedConfigs": {
+					"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}
+				}
+			}}
+		}]}}},
+		{"musicTwoRowItemRenderer": {"title": {"runs": [{
+			"text": "Real Playlist",
+			"navigationEndpoint": {"browseEndpoint": {
+				"browseId": "VLPLreal",
+				"browseEndpointContextSupportedConfigs": {
+					"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_PLAYLIST"}
+				}
+			}}
+		}]}}}
+	]}}}`)
+	pls, err := LibraryPlaylists(raw)
+	if err != nil {
+		t.Fatalf("LibraryPlaylists: %v", err)
+	}
+	if len(pls) != 1 || pls[0].ID != "PLreal" {
+		t.Errorf("got %+v, want exactly the playlist tile (PLreal)", pls)
 	}
 }
 
@@ -103,10 +187,68 @@ func TestPlaylistTracks_fixture(t *testing.T) {
 }
 
 func TestPlaylistTracks_notSignedIn(t *testing.T) {
-	// No musicPlaylistShelfRenderer => logged-out page => ErrNotSignedIn.
+	// No musicPlaylistShelfRenderer and no logged_in marker => logged-out page
+	// => ErrNotSignedIn.
 	_, err := PlaylistTracks([]byte(`{"contents":{}}`))
 	if !errors.Is(err, ErrNotSignedIn) {
 		t.Fatalf("err = %v, want ErrNotSignedIn", err)
+	}
+}
+
+func TestPlaylistTracks_loggedOutFixture(t *testing.T) {
+	// Trimmed live anonymous VLLM capture: logged_in "0" plus a sign-in
+	// messageRenderer instead of the playlist shelf.
+	data, err := os.ReadFile("testdata/playlist_tracks_logged_out.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	_, err = PlaylistTracks(data)
+	if !errors.Is(err, ErrNotSignedIn) {
+		t.Fatalf("err = %v, want ErrNotSignedIn", err)
+	}
+}
+
+func TestPlaylistTracks_emptyButSignedInMarker(t *testing.T) {
+	// logged_in "1" with no shelf at all is a signed-in empty playlist page
+	// (e.g. zero liked songs rendered as an empty-state message), not
+	// ErrNotSignedIn.
+	raw := []byte(`{
+		"responseContext": {"serviceTrackingParams": [
+			{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "1"}]}
+		]},
+		"contents": {}
+	}`)
+	tracks, err := PlaylistTracks(raw)
+	if err != nil {
+		t.Fatalf("PlaylistTracks on signed-in empty page: %v", err)
+	}
+	if len(tracks) != 0 {
+		t.Errorf("got %d tracks, want 0", len(tracks))
+	}
+}
+
+func TestPlaylistTracks_anonymousPublicPlaylist(t *testing.T) {
+	// A public playlist browses fine anonymously: logged_in "0" with a present
+	// shelf must parse the tracks, not return ErrNotSignedIn.
+	raw := []byte(`{
+		"responseContext": {"serviceTrackingParams": [
+			{"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": "0"}]}
+		]},
+		"contents": {"musicPlaylistShelfRenderer": {"contents": [
+			{"musicResponsiveListItemRenderer": {
+				"playlistItemData": {"videoId": "dQw4w9WgXcQ"},
+				"flexColumns": [
+					{"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Public Song"}]}}}
+				]
+			}}
+		]}}
+	}`)
+	tracks, err := PlaylistTracks(raw)
+	if err != nil {
+		t.Fatalf("PlaylistTracks on anonymous public playlist: %v", err)
+	}
+	if len(tracks) != 1 || tracks[0].VideoID != "dQw4w9WgXcQ" {
+		t.Errorf("got %+v, want the one public track", tracks)
 	}
 }
 

@@ -2,6 +2,7 @@ package ytm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,4 +96,47 @@ func TestAccountInfo_liveAuth(t *testing.T) {
 		t.Fatalf("AccountInfo: %v", err)
 	}
 	t.Logf("live AccountInfo: signedIn=%v name=%q", signedIn, name)
+}
+
+// TestAccountInfo_liveAnonymous validates the logged-out account_menu shape
+// against the real endpoint with NO credentials: an anonymous client must
+// resolve as ("", false, nil), matching the account_logged_out.json fixture's
+// assumption. Skipped unless TUBEAMP_LIVE=1.
+func TestAccountInfo_liveAnonymous(t *testing.T) {
+	if os.Getenv("TUBEAMP_LIVE") != "1" {
+		t.Skip("set TUBEAMP_LIVE=1 to run live network tests")
+	}
+
+	c := NewClient(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	name, signedIn, err := c.AccountInfo(ctx)
+	if err != nil {
+		t.Fatalf("AccountInfo (anonymous): %v", err)
+	}
+	if signedIn || name != "" {
+		t.Errorf("anonymous AccountInfo = (%q, %v), want (\"\", false)", name, signedIn)
+	}
+}
+
+// TestLibrary_liveAnonymous validates the logged-out library discriminator
+// against the real endpoints with NO credentials: anonymous LibraryPlaylists
+// and LikedSongs browses must surface ErrNotSignedIn — never an empty success
+// or bogus data. Skipped unless TUBEAMP_LIVE=1.
+func TestLibrary_liveAnonymous(t *testing.T) {
+	if os.Getenv("TUBEAMP_LIVE") != "1" {
+		t.Skip("set TUBEAMP_LIVE=1 to run live network tests")
+	}
+
+	c := NewClient(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if _, err := c.LibraryPlaylists(ctx); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("anonymous LibraryPlaylists err = %v, want ErrNotSignedIn", err)
+	}
+	if _, err := c.LikedSongs(ctx); !errors.Is(err, ErrNotSignedIn) {
+		t.Errorf("anonymous LikedSongs err = %v, want ErrNotSignedIn", err)
+	}
 }

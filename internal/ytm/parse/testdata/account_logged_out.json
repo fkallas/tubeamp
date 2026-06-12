@@ -1,5 +1,21 @@
 {
-  "responseContext": {},
+  "responseContext": {
+    "serviceTrackingParams": [
+      {
+        "service": "CSI",
+        "params": [
+          {"key": "c", "value": "WEB_REMIX"},
+          {"key": "yt_li", "value": "0"}
+        ]
+      },
+      {
+        "service": "GFEEDBACK",
+        "params": [
+          {"key": "logged_in", "value": "0"}
+        ]
+      }
+    ]
+  },
   "actions": [
     {
       "openPopupAction": {
@@ -11,24 +27,52 @@
                   "items": [
                     {
                       "compactLinkRenderer": {
+                        "icon": {"iconType": "UNLIMITED"},
                         "title": {
                           "runs": [
-                            { "text": "Sign in" }
+                            {"text": "Get Music Premium"}
                           ]
                         },
                         "navigationEndpoint": {
-                          "signInEndpoint": {
-                            "hack": true
+                          "browseEndpoint": {
+                            "browseId": "SPunlimited",
+                            "canonicalBaseUrl": "/music_premium"
                           }
+                        }
+                      }
+                    },
+                    {
+                      "compactLinkRenderer": {
+                        "icon": {"iconType": "SETTINGS"},
+                        "title": {
+                          "runs": [
+                            {"text": "Settings"}
+                          ]
+                        },
+                        "navigationEndpoint": {
+                          "applicationSettingsEndpoint": {"hack": true}
+                        }
+                      }
+                    },
+                    {
+                      "compactLinkRenderer": {
+                        "icon": {"iconType": "HELP"},
+                        "title": {
+                          "runs": [
+                            {"text": "Help"}
+                          ]
                         }
                       }
                     }
                   ]
                 }
               }
-            ]
+            ],
+            "style": "MULTI_PAGE_MENU_STYLE_TYPE_ACCOUNT"
           }
-        }
+        },
+        "popupType": "DROPDOWN",
+        "reusePopup": true
       }
     }
   ]

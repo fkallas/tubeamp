@@ -354,11 +354,20 @@ func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums 
 func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
 func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account/account_menu menu (both shapes)
 
-var ErrNotSignedIn = errors.New("ytm: not signed in") // logged-out page (expected renderer absent)
+var ErrNotSignedIn = errors.New("ytm: not signed in") // logged-out page. Detected positively via the
+                                                  // responseContext "logged_in" marker ("0" => logged out;
+                                                  // "1" + expected renderer absent => signed-in EMPTY page,
+                                                  // an empty success); renderer absence alone decides only
+                                                  // when the marker is missing
 func LibraryPlaylists(raw []byte) ([]model.Playlist, error) // FEmusic_liked_playlists gridRenderer;
-                                                  // skips "New playlist" tile; ErrNotSignedIn when no gridRenderer
+                                                  // skips the "New playlist" tile and non-playlist tiles
+                                                  // (pageType / VL-PL id prefix checked); logged_in "0" =>
+                                                  // ErrNotSignedIn even if a stray grid is present
 func PlaylistTracks(raw []byte) ([]model.Track, error)     // playlist/Liked-Songs musicPlaylistShelfRenderer;
-                                                  // ErrNotSignedIn when absent; present-but-empty shelf => empty slice
+                                                  // a present shelf always parses (public playlists browse
+                                                  // fine anonymously); present-but-empty shelf => empty
+                                                  // slice; shelf absent => empty slice when logged_in "1",
+                                                  // else ErrNotSignedIn
 // All defensive: skip malformed items, never panic. AlbumPage handles BOTH
 // header shapes (musicDetailHeaderRenderer and musicResponsiveHeaderRenderer);
 // per-track artists fall back to album artists, Track.Album = album title,
@@ -373,11 +382,13 @@ comment. Parser fixtures in `parse/testdata/` (`search_songs.json`,
 derived-album dedup (two song rows share one MPRE… album, one row has no album);
 `album_page_detail.json` is
 handcrafted to exercise the older `musicDetailHeaderRenderer` shape.
-`account_signed_in.json` / `account_logged_out.json` are handcrafted to exercise
-both `AccountInfo` shapes (with and without `activeAccountHeaderRenderer`).
+`account_signed_in.json` is handcrafted to exercise the signed-in `AccountInfo`
+shape (with `activeAccountHeaderRenderer`); `account_logged_out.json`,
+`library_playlists_logged_out.json` and `playlist_tracks_logged_out.json` are
+trimmed live anonymous captures of the logged-out shapes, cross-checked by the
+credential-free anonymous live tests (gated on `TUBEAMP_LIVE=1`).
 `library_playlists.json` / `playlist_tracks.json` are handcrafted (grid +
-playlist-shelf), each with one malformed item skipped; the not-signed-in path is
-covered by feeding a renderer-less object and asserting `ErrNotSignedIn`.
+playlist-shelf), each with one malformed item skipped.
 
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 
