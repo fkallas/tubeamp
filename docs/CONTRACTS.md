@@ -937,11 +937,24 @@ value (`-auth chrome`, `-auth=chrome`) and stands alone (bare `-auth` ⇒ "auto"
 via a custom `flag.Value` with `IsBoolFlag`; the space form `-auth chrome` is
 recovered from the trailing positional).
 
+`oauth.go`: `-login` runs the OAuth device flow and exits (does not open the TUI
+or touch the daemon). It requires `oauth_client_id`/`oauth_client_secret` in
+config (else a clear error + one-time-setup pointer to the README, exit 1);
+`ytm.RequestDeviceCode`; prints the `verification_url` + `user_code` prominently
+and "Waiting…"; `ytm.PollToken` (bounded by the code's `expires_in`); on success
+writes `DataDir()/oauth.json` (0600) and prints `signed in as <name>` via a
+Bearer `AccountInfo` probe — handling denial/timeout/probe-error cleanly. The
+device-flow + confirm calls are stubbable package vars
+(`oauthRequestDeviceCode`/`oauthPollToken`/`oauthConfirmSignIn`). `-logout`
+deletes `oauth.json` (a missing file is reported, not an error).
+
 `main.go`: parse flags; `config.Load`. With no control flag set it runs the TUI:
 `-theme <name>` override, `-version`; `theme.Load` (fall back to `theme.Default()`
 with a warning); `player.New` (attach-or-spawn; on error nil player + degraded
-notice); `ytm.LoadAuth(DataDir()/auth)` (missing → nil auth) + `ytm.NewClient`
-then `client.SetAuthUser(cfg.AuthUser)`; `core.NewQueue`; `ui.New`;
+notice); `buildClient(cfg)` — OAuth mode (`oauth_client_id`/`secret` set AND
+`DataDir()/oauth.json` loads) is preferred over `ytm.LoadAuth(DataDir()/auth)`,
+falling back to cookie auth then unauthenticated — then
+`client.SetAuthUser(cfg.AuthUser)`; `core.NewQueue`; `ui.New`;
 `tea.NewProgram(..., tea.WithAltScreen())`. On exit: `player.Close()` — a DETACH,
 so mpv keeps playing in the background.
 

@@ -51,6 +51,11 @@ func main() {
 	var authFlag authBrowserFlag
 	flag.Var(&authFlag, "auth", "import sign-in cookies from a browser (chrome/chromium/edge/brave/firefox/safari; bare -auth = auto)")
 
+	// -login / -logout drive the durable OAuth device-flow sign-in (requires
+	// oauth_client_id/secret in config). They run and exit like -auth.
+	loginFlag := flag.Bool("login", false, "sign in via the OAuth device flow (durable, auto-refreshing)")
+	logoutFlag := flag.Bool("logout", false, "sign out of OAuth (delete the stored token)")
+
 	flag.Parse()
 
 	if *versionFlag {
@@ -69,6 +74,14 @@ func main() {
 	// TUI or touch the daemon).
 	if authFlag.set {
 		os.Exit(runAuthImport(os.Stdout, os.Stderr, cfg, authBrowser(&authFlag)))
+	}
+
+	// -login / -logout run the OAuth device flow and exit.
+	if *loginFlag {
+		os.Exit(runLogin(os.Stdout, os.Stderr, cfg))
+	}
+	if *logoutFlag {
+		os.Exit(runLogout(os.Stdout, os.Stderr))
 	}
 
 	cf := controlFlags{
@@ -120,13 +133,11 @@ func run(cfg *config.Config, themeOverride string) error {
 		defer p.Close()
 	}
 
-	// Auth: a missing or unreadable auth file simply means unauthenticated. The
-	// client is still constructed (search works without credentials).
-	var auth *ytm.Auth
-	if a, aerr := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth")); aerr == nil {
-		auth = a
-	}
-	client := ytm.NewClient(auth)
+	// Auth. OAuth (durable, auto-refreshing) is preferred when its credentials
+	// are configured and a token exists; otherwise fall back to the cookie auth
+	// file. A missing/unreadable source simply means unauthenticated — the client
+	// is still constructed (search works without credentials).
+	client := buildClient(cfg)
 	client.SetAuthUser(cfg.AuthUser)
 
 	q := core.NewQueue()
@@ -137,4 +148,26 @@ func run(cfg *config.Config, themeOverride string) error {
 		return fmt.Errorf("running ui: %w", err)
 	}
 	return nil
+}
+
+// buildClient constructs the InnerTube client for the TUI, preferring OAuth.
+// When oauth_client_id/secret are configured AND a token file (oauth.json)
+// loads, it returns an OAuth Bearer client that refreshes (and persists) its
+// token automatically. Otherwise it falls back to the cookie auth file, and to
+// an unauthenticated client when neither is present. The caller still calls
+// SetAuthUser (it is a no-op for OAuth requests).
+func buildClient(cfg *config.Config) *ytm.Client {
+	if cfg.OAuthClientID != "" && cfg.OAuthClientSecret != "" {
+		path := filepath.Join(config.DataDir(), "oauth.json")
+		if tok, err := ytm.LoadOAuthToken(path); err == nil {
+			c := ytm.NewClient(nil)
+			c.UseOAuth(tok, ytm.OAuthCreds{ClientID: cfg.OAuthClientID, ClientSecret: cfg.OAuthClientSecret}, path)
+			return c
+		}
+	}
+	var auth *ytm.Auth
+	if a, aerr := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth")); aerr == nil {
+		auth = a
+	}
+	return ytm.NewClient(auth)
 }

@@ -152,14 +152,75 @@ now-playing line simply appears once you start a track.
 ## Signing in
 
 tubeamp talks to YouTube Music's private InnerTube API. Search works logged out,
-but signing in unlocks results tied to your account. Auth is a single cookie
-header stored in a plain-text file:
+but signing in unlocks results tied to your account. There are two ways to sign
+in: **OAuth** (durable, recommended for a session that lasts months) and
+**cookies** (imported from your browser, or copied by hand).
+
+### OAuth (durable sign-in)
+
+OAuth gives you a long-lived, auto-refreshing session — no cookie rotation, no
+re-importing. Because Google revoked the shared OAuth credentials ytmusicapi
+once bundled, you create your own Google OAuth client once. It is free and takes
+a couple of minutes.
+
+**One-time Google Cloud setup**
+
+1. Open the [Google Cloud Console](https://console.cloud.google.com/) and create
+   (or pick) a project.
+2. Enable the **YouTube Data API v3** for that project
+   (APIs & Services → Library → search "YouTube Data API v3" → Enable).
+3. Configure the OAuth consent screen if prompted (External; you only need to add
+   yourself as a test user).
+4. APIs & Services → Credentials → **Create credentials → OAuth client ID**, and
+   choose application type **"TVs and Limited Input devices"**.
+5. Copy the generated **client ID** and **client secret** into
+   `~/.config/tubeamp/config.yaml`:
+
+   ```yaml
+   oauth_client_id:     "XXXXXXXX.apps.googleusercontent.com"
+   oauth_client_secret: "YYYYYYYY"
+   ```
+
+**Signing in**
+
+```sh
+tubeamp -login     # prints a URL + code; open it, enter the code, done
+tubeamp -logout    # forget the OAuth token
+```
+
+`-login` prints a verification URL and a short user code. Open the URL in any
+browser (phone is fine), enter the code, and approve. tubeamp polls in the
+background and, once you approve, saves the token and prints `signed in as
+<name>`. The token is stored at:
+
+```
+~/.local/share/tubeamp/oauth.json    # or $XDG_DATA_HOME/tubeamp/oauth.json
+```
+
+It **lasts months and refreshes itself automatically** — tubeamp swaps in a new
+access token whenever the old one expires, with no action from you. On startup,
+if `oauth.json` exists and the client credentials are configured, tubeamp uses
+OAuth in preference to the cookie auth file. `-logout` just deletes `oauth.json`.
+
+What OAuth unlocks is durable **library** access — your Liked Songs and
+playlists — without the cookie-rotation headache below. A couple of caveats:
+
+- OAuth does **not** change album-search ranking. The thin album-search results
+  for some queries are an InnerTube quirk, already worked around by the
+  song-derived album fallback; signing in (either way) does not affect it.
+- OAuth talks to YouTube as a TV/limited-input client, so its API surface differs
+  slightly from the web client — a few web-only fields may be absent — but search,
+  library, playlists, albums and lyrics all work.
+
+### Cookies (browser import)
+
+Cookie auth stores a single cookie header in a plain-text file:
 
 ```
 ~/.local/share/tubeamp/auth          # or $XDG_DATA_HOME/tubeamp/auth
 ```
 
-**Recommended: import from your browser (one command)**
+**Import from your browser (one command)**
 
 If you are already logged into YouTube Music in a browser, sign in with a single
 command — tubeamp reads the sign-in cookies out of the browser (via yt-dlp's
