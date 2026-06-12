@@ -40,10 +40,12 @@ const (
 	// playlistsItemCap bounds LibraryPlaylists pagination (~4 pages).
 	playlistsItemCap = 200
 
-	// tracksItemCap and tracksPageCap bound the track listings to the first
-	// ~2 pages (~100 items). Full pagination is left as a TODO on playlistItems.
-	tracksItemCap = 100
-	tracksPageCap = 2
+	// tracksItemCap and tracksPageCap bound a single track listing's full
+	// pagination. playlistItems follows nextPageToken to exhaustion; these are a
+	// safety ceiling (~5000 items / ~100 pages of 50) so a runaway/looping
+	// nextPageToken cannot spin forever or exhaust memory.
+	tracksItemCap = 5000
+	tracksPageCap = 100
 
 	// respLimit caps how much of a response body is read, to avoid runaway
 	// allocations on an unexpected payload.
@@ -160,8 +162,9 @@ func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
 }
 
 // PlaylistTracks returns the tracks of the playlist with the given id via
-// playlistItems?part=snippet,contentDetails. Only the first ~2 pages (~100
-// tracks) are fetched; items with no videoId (deleted/private) are skipped.
+// playlistItems?part=snippet,contentDetails, following nextPageToken to
+// completion (bounded by the ~5000-item / ~100-page safety ceiling). Items with
+// no videoId (deleted/private) are skipped.
 func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model.Track, error) {
 	tracks, err := c.playlistItems(ctx, playlistID)
 	if err != nil {
@@ -171,10 +174,9 @@ func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model
 }
 
 // LikedSongs returns the user's liked videos via the "LL" auto-playlist, the
-// same shape as PlaylistTracks (first ~2 pages / ~100 tracks). NOTE: "LL" is
-// YouTube's all-liked-VIDEOS list (music or not) — broader than YT Music's
-// Liked Music (the cookie path's "VLLM" browse), which the Data API does not
-// expose.
+// same shape as PlaylistTracks (fully paginated). NOTE: "LL" is YouTube's
+// all-liked-VIDEOS list (music or not) — broader than YT Music's Liked Music
+// (the cookie path's "VLLM" browse), which the Data API does not expose.
 func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error) {
 	tracks, err := c.playlistItems(ctx, "LL")
 	if err != nil {
@@ -184,12 +186,11 @@ func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error) {
 }
 
 // playlistItems fetches and maps the items of a playlist, following
-// nextPageToken up to the (small) track caps.
+// nextPageToken to exhaustion (bounded by tracksPageCap / tracksItemCap so a
+// looping token cannot spin forever or exhaust memory).
 func (c *Client) playlistItems(ctx context.Context, playlistID string) ([]model.Track, error) {
 	var out []model.Track
 	pageToken := ""
-	// TODO: full pagination — follow nextPageToken to exhaustion for complete
-	// playlists. The UI currently only needs the first ~2 pages (~100 tracks).
 	for page := 0; page < tracksPageCap; page++ {
 		q := url.Values{
 			"part":       {"snippet,contentDetails"},

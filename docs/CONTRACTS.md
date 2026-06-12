@@ -553,16 +553,41 @@ func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
                                        // FEmusic_liked_playlists browse.
 func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model.Track, error)
                                        // playlistItems?part=snippet,contentDetails
-                                       // &playlistId=<id>&maxResults=50, first ~2
-                                       // pages / ~100 tracks (TODO: full pagination).
-                                       // mapVideo per item; items with no videoId
-                                       // (deleted/private) are skipped.
+                                       // &playlistId=<id>&maxResults=50, follows
+                                       // nextPageToken to completion (safety ceiling
+                                       // ~5000 items / ~100 pages). mapVideo per item;
+                                       // items with no videoId (deleted/private) skipped.
 func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error)
                                        // PlaylistTracks against playlistId="LL" —
                                        // YouTube's all-liked-VIDEOS auto-playlist
                                        // (music or not), broader than YT Music's
                                        // Liked Music ("VLLM"), which only the cookie
-                                       // path can browse.
+                                       // path can browse. Fully paginated.
+func (c *Client) LibrarySongs(ctx context.Context) ([]model.Track, error)
+                                       // the user's WHOLE library aggregated: LikedSongs
+                                       // ++ every LibraryPlaylists playlist's tracks,
+                                       // deduped by VideoID (first wins), liked first
+                                       // then playlists (in LibraryPlaylists order). A
+                                       // single playlist fetch failure is log-skipped
+                                       // (partial result); only a LikedSongs/
+                                       // LibraryPlaylists failure is fatal. The most
+                                       // quota/time-expensive call here — cache it.
+
+// Pure library-grouping helpers (no network). GroupArtists/AlbumsFromTracks back
+// the Library "Artists"/"Albums" sections — honest substitutes for the InnerTube
+// browse pages OAuth cannot reach.
+type ArtistGroup struct{ Name string; Tracks []model.Track }
+func GroupArtists(tracks []model.Track) []ArtistGroup
+                                       // group by primary artist (Artists[0]; empty
+                                       // skipped), case-insensitive key (first-seen
+                                       // casing kept), groups sorted by Name, tracks
+                                       // keep input order.
+func AlbumsFromTracks(tracks []model.Track) []model.Album
+                                       // group (ideally enriched) tracks by AlbumID
+                                       // (""s skipped), one Album per group
+                                       // (Title/Artists/ThumbURL from the rows,
+                                       // BrowseID=AlbumID), deduped, sorted by Title.
+                                       // Selecting one reuses the GetAlbum flow.
 ```
 
 `mapVideo` maps a playlistItems snippet+contentDetails to a `model.Track`:
