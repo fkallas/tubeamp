@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/fkallas/tubeamp/internal/model"
@@ -31,11 +32,25 @@ const (
 )
 
 // Client is an authenticated or unauthenticated InnerTube client for YouTube Music.
+//
+// It supports two authentication modes. The default cookie mode signs requests
+// with the Cookie header + a SAPISIDHASH Authorization (see Auth). OAuth mode
+// (UseOAuth) instead sends an Authorization: Bearer <access_token> with the OAuth
+// client User-Agent, refreshing the access token when it expires. OAuth, when
+// configured, takes precedence over a cookie Auth.
 type Client struct {
 	hc       *http.Client
 	auth     *Auth
 	authUser int    // X-Goog-AuthUser account index (config auth_user)
 	baseURL  string // InnerTube base; overridable in tests
+
+	// OAuth mode (set by UseOAuth). When oauth is non-nil, post() uses Bearer
+	// auth instead of the cookie/SAPISIDHASH path. oauthMu guards the
+	// refresh-and-persist of the token across concurrent requests.
+	oauthMu    sync.Mutex
+	oauth      *OAuthToken
+	oauthCreds OAuthCreds
+	oauthPath  string // where refreshed tokens are persisted; "" = memory only
 }
 
 // NewClient creates a new Client. a may be nil for unauthenticated access;
@@ -49,6 +64,20 @@ func NewClient(a *Auth) *Client {
 	}
 }
 
+// UseOAuth switches the client into OAuth Bearer mode using tok and creds.
+// Requests then carry Authorization: Bearer <access_token> (and the OAuth client
+// User-Agent) instead of the cookie/SAPISIDHASH headers. When the access token
+// is expired it is refreshed before the request and, if tokenPath is non-empty,
+// the refreshed token is persisted there atomically (0600). OAuth takes
+// precedence over any cookie Auth passed to NewClient.
+func (c *Client) UseOAuth(tok *OAuthToken, creds OAuthCreds, tokenPath string) {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+	c.oauth = tok
+	c.oauthCreds = creds
+	c.oauthPath = tokenPath
+}
+
 // SetAuthUser sets the X-Goog-AuthUser account index sent on authenticated
 // requests. It selects which of several signed-in Google accounts to act as
 // (0 = the first/default account).
@@ -59,11 +88,32 @@ func (c *Client) SetAuthUser(n int) {
 	c.authUser = n
 }
 
-// Authenticated reports whether the client carries credentials (an auth cookie
-// was loaded). A stale cookie may still resolve as anonymous on YouTube's side,
-// so use AccountInfo to confirm the live sign-in state.
+// Authenticated reports whether the client carries credentials — a cookie Auth
+// was loaded, or OAuth mode is configured. It is NOT a live sign-in check (a
+// stale cookie or revoked token may still resolve anonymous on YouTube's side);
+// use AccountInfo to confirm the live sign-in state.
 func (c *Client) Authenticated() bool {
-	return c.auth != nil
+	return c.auth != nil || c.oauth != nil
+}
+
+// oauthAuthorization returns the Authorization header value for OAuth mode,
+// refreshing the access token first when it has expired and persisting the
+// refreshed token (best-effort) when a path is configured. The lock serializes
+// concurrent requests so only one refresh runs at a time.
+func (c *Client) oauthAuthorization(ctx context.Context) (string, error) {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+	if c.oauth.IsExpired(time.Now()) {
+		if err := c.oauth.Refresh(ctx, c.oauthCreds); err != nil {
+			return "", fmt.Errorf("ytm: refresh oauth token: %w", err)
+		}
+		if c.oauthPath != "" {
+			// Best-effort: the refreshed token is already live in memory, so a
+			// persistence failure must not break the request.
+			_ = c.oauth.Save(c.oauthPath)
+		}
+	}
+	return c.oauth.Authorization(), nil
 }
 
 // post sends a JSON POST to https://music.youtube.com/youtubei/v1/<endpoint>
@@ -86,10 +136,22 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 	req.Header.Set("Origin", ytmOrigin)
 	req.Header.Set("X-Origin", ytmOrigin)
 
-	if c.auth != nil {
-		// One consistent snapshot: reading the SAPISID and the Cookie header
-		// under separate locks would let a concurrent rotation slip between the
-		// two and sign the request with a mismatched SAPISID.
+	switch {
+	case c.oauth != nil:
+		// OAuth mode: a Bearer access token (refreshed when expired) and the
+		// OAuth client User-Agent — no Cookie, no SAPISIDHASH. The InnerTube
+		// payload still carries the WEB_REMIX context (ytmusicapi does the same).
+		authz, err := c.oauthAuthorization(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", oauthInnerTubeUA)
+		req.Header.Set("Authorization", authz)
+		req.Header.Set("X-Goog-Request-Time", strconv.FormatInt(time.Now().Unix(), 10))
+	case c.auth != nil:
+		// Cookie mode. One consistent snapshot: reading the SAPISID and the
+		// Cookie header under separate locks would let a concurrent rotation slip
+		// between the two and sign the request with a mismatched SAPISID.
 		header, sapisid, err := c.auth.headerAndSAPISID()
 		if err != nil {
 			return nil, fmt.Errorf("ytm: get SAPISID: %w", err)

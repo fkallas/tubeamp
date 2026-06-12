@@ -30,6 +30,14 @@ type Config struct {
 	// (tubeamp -auth <browser>). When set, the UI can re-import from it to
 	// refresh a session that has gone stale. Empty means no import source.
 	AuthBrowser string `yaml:"auth_browser"`
+	// OAuthClientID and OAuthClientSecret are the user-supplied Google Cloud
+	// OAuth client credentials (client type "TV and Limited Input devices")
+	// used by the durable OAuth device-flow sign-in (tubeamp -login). Google
+	// revoked the shared TV credentials ytmusicapi once bundled, so each user
+	// supplies their own. Both empty disables OAuth (cookie auth is used).
+	// The resulting token is stored at DataDir()/oauth.json.
+	OAuthClientID     string `yaml:"oauth_client_id"`
+	OAuthClientSecret string `yaml:"oauth_client_secret"`
 }
 
 // Default returns the default configuration.
@@ -124,6 +132,8 @@ func CacheDir() string {
 }
 
 // DataDir returns the data directory: $XDG_DATA_HOME/tubeamp or ~/.local/share/tubeamp.
+// It holds the cookie auth file ("auth"), the OAuth token ("oauth.json"), and the
+// mpv daemon socket/queue sidecar.
 func DataDir() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "tubeamp")

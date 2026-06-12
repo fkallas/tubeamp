@@ -67,8 +67,20 @@ type Config struct {
     AuthUser   int    `yaml:"auth_user"`   // X-Goog-AuthUser account index, default 0 (multi-account)
     AuthBrowser string `yaml:"auth_browser"` // browser a sign-in was imported from (tubeamp -auth); ""=none.
                                               // Lets the UI re-import to refresh a stale session.
+    OAuthClientID     string `yaml:"oauth_client_id"`     // user-supplied Google OAuth client (type "TV and Limited
+    OAuthClientSecret string `yaml:"oauth_client_secret"` // Input devices"). Both empty => OAuth disabled (cookie auth).
+                                                          // Enables the durable device-flow sign-in (tubeamp -login).
 }
+```
 
+OAuth token storage: `DataDir()/oauth.json` — JSON `{access_token, refresh_token,
+expires_at (unix secs), expires_in, token_type, scope}`, written 0600 via the
+shared atomic writer. Field names match ytmusicapi's oauth.json (interoperable).
+When `oauth_client_id`/`oauth_client_secret` are set and `oauth.json` exists, the
+TUI builds the InnerTube client in OAuth mode, preferred over the cookie `auth`
+file; otherwise cookie auth is used (unchanged).
+
+```go
 const (
     ArtPaletteAuto  = "auto"  // covers keep their own colors (median-cut)
     ArtPaletteTheme = "theme" // covers snap to the active theme's palette
@@ -306,6 +318,22 @@ and `X-Origin`/`Origin: https://music.youtube.com`. The `X-Goog-AuthUser` header
 carries the configured account index (`config.AuthUser`, default 0) set via
 `SetAuthUser`, not a hardcoded "0".
 
+**OAuth mode (additive; cookie auth unchanged).** `Client.UseOAuth(tok, creds,
+tokenPath)` switches the client to OAuth: `post()` then sends `Authorization:
+Bearer <access_token>` plus `X-Goog-Request-Time` and the OAuth client
+User-Agent (ytmusicapi's plain Firefox UA, no Cobalt suffix) — NO Cookie, NO
+SAPISIDHASH, NO X-Goog-AuthUser, NO Set-Cookie absorption. The InnerTube payload
+still carries the WEB_REMIX `context` (ytmusicapi does the same with OAuth). When
+the access token is expired (or within 60s of it) `post()` refreshes it first
+(serialized by a mutex) and persists the refreshed token to `tokenPath` (0600,
+best-effort). OAuth takes precedence over a cookie `Auth`. The device-flow
+endpoints/scope/grant/User-Agent mirror ytmusicapi: scope
+`https://www.googleapis.com/auth/youtube`, device code POST to
+`https://www.youtube.com/o/oauth2/device/code`, token POST to
+`https://oauth2.googleapis.com/token`, device grant
+`http://oauth.net/grant_type/device/1.0`, refresh `grant_type=refresh_token`,
+User-Agent the Firefox UA + ` Cobalt/Version`.
+
 Cookie rotation: Google attaches `Set-Cookie` (SIDCC, __Secure-1PSIDCC, sometimes
 __Secure-*PSIDTS) to many responses. After every request `Client.post` folds
 `resp.Cookies()` into the `Auth` cookie jar (new/changed values win; Max-Age=0 or
@@ -348,7 +376,33 @@ func (a *Auth) Generation() uint64        // bumps on every absorbed rotation; U
 type Client struct{ ... }
 func NewClient(a *Auth) *Client // a may be nil => unauthenticated (search still works)
 func (c *Client) SetAuthUser(n int)     // X-Goog-AuthUser index for multi-account (clamped >=0)
-func (c *Client) Authenticated() bool   // an auth cookie was loaded (NOT a live sign-in check)
+func (c *Client) Authenticated() bool   // a cookie Auth OR OAuth mode is set (NOT a live sign-in check)
+func (c *Client) UseOAuth(tok *OAuthToken, creds OAuthCreds, tokenPath string) // switch to Bearer OAuth mode;
+                                        // refreshes+persists tok to tokenPath ("" => memory only) on expiry
+
+// OAuth device-flow + token store (mirrors ytmusicapi). User supplies creds.
+type OAuthCreds struct{ ClientID, ClientSecret string }
+type OAuthToken struct {
+    AccessToken, RefreshToken, Scope, TokenType string // JSON: access_token/refresh_token/scope/token_type
+    ExpiresAt, ExpiresIn int64                          // JSON: expires_at (unix secs) / expires_in
+}
+func LoadOAuthToken(path string) (*OAuthToken, error)  // parse DataDir()/oauth.json; errs if empty/missing/malformed
+func (t *OAuthToken) Save(path string) error           // atomic 0600 JSON write (shared writer), parent dir 0700
+func (t *OAuthToken) IsExpired(now time.Time) bool     // true when ExpiresAt-now < 60s (also true for zero ExpiresAt)
+func (t *OAuthToken) Authorization() string            // "<TokenType|Bearer> <AccessToken>"
+func (t *OAuthToken) Refresh(ctx, creds OAuthCreds) error // grant_type=refresh_token; updates access/expiry in place
+
+type DeviceCode struct {
+    DeviceCode, UserCode, VerificationURL string // JSON: device_code/user_code/verification_url
+    ExpiresIn, Interval int                       // JSON: expires_in/interval
+}
+func RequestDeviceCode(ctx, creds OAuthCreds) (DeviceCode, error) // POST device/code {scope, client_id}
+func PollToken(ctx, creds OAuthCreds, dc DeviceCode) (*OAuthToken, error) // poll token endpoint at dc.Interval;
+                                        // honours authorization_pending (wait) + slow_down (interval+=5s);
+                                        // access_denied/expired_token => error; ctx cancel aborts
+
+// OAuthError carries the OAuth endpoint "error" code (errors.As-matchable).
+type OAuthError struct{ Code, Description string; Status int }
 func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error)       // songs filter
 func (c *Client) SearchWithAlbums(ctx context.Context, query string) (tracks []model.Track, derivedAlbums []model.Album, err error)
                                                   // one request, songs filter; derivedAlbums are the album refs
