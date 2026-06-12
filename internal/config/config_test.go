@@ -73,6 +73,53 @@ func TestLoadAuthUserDefault(t *testing.T) {
 	}
 }
 
+// TestAuthBrowserRoundtrip asserts auth_browser persists through Save/Load, while
+// a config that omits it keeps the empty default (no remembered import source).
+func TestAuthBrowserRoundtrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	cfg := Default()
+	cfg.AuthBrowser = "firefox"
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save(): %v", err)
+	}
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if loaded.AuthBrowser != "firefox" {
+		t.Errorf("AuthBrowser: got %q, want %q", loaded.AuthBrowser, "firefox")
+	}
+}
+
+// TestAuthBrowserDefaultEmpty confirms a config without auth_browser keeps the
+// empty default.
+func TestAuthBrowserDefaultEmpty(t *testing.T) {
+	if got := Default().AuthBrowser; got != "" {
+		t.Errorf("Default AuthBrowser: got %q, want empty", got)
+	}
+
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	configDir := filepath.Join(tmpDir, "tubeamp")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("theme: nord\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.AuthBrowser != "" {
+		t.Errorf("AuthBrowser (unset): got %q, want empty", cfg.AuthBrowser)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	// Set XDG vars to temp directory (file doesn't exist)
 	tmpDir := t.TempDir()

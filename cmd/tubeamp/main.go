@@ -44,6 +44,13 @@ func main() {
 	killFlag := flag.Bool("kill", false, "quit the background mpv daemon")
 	volFlag := flag.String("vol", "", "set volume: N, +N, or -N")
 	seekFlag := flag.String("seek", "", "seek by ±SECONDS (relative)")
+
+	// -auth imports a sign-in by reading cookies from a browser. It accepts a
+	// browser name (-auth chrome / -auth=chrome) or stands alone (-auth) for
+	// "auto" (try every supported browser).
+	var authFlag authBrowserFlag
+	flag.Var(&authFlag, "auth", "import sign-in cookies from a browser (chrome/chromium/edge/brave/firefox/safari; bare -auth = auto)")
+
 	flag.Parse()
 
 	if *versionFlag {
@@ -56,6 +63,12 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tubeamp:", err)
 		os.Exit(1)
+	}
+
+	// -auth runs the one-command browser import and exits (it does not open the
+	// TUI or touch the daemon).
+	if authFlag.set {
+		os.Exit(runAuthImport(os.Stdout, os.Stderr, cfg, authBrowser(&authFlag)))
 	}
 
 	cf := controlFlags{

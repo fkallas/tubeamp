@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"image"
 	"strings"
 	"testing"
@@ -1012,5 +1013,133 @@ func TestLogoIndicatorTruncatedAtNarrowWidth(t *testing.T) {
 			t.Errorf("line %d width = %d, want 70", i, got)
 			break
 		}
+	}
+}
+
+// ── Stale-session auto-refresh ───────────────────────────────────────────────
+
+// staleModel builds a test model wired so the auto-refresh can fire: an auth file
+// is present (hasAuth) and a browser is remembered to re-import from. reimportFn
+// is replaced with fn so neither a browser nor the network is touched.
+func staleModel(t *testing.T, browser string, fn reimportFunc) Model {
+	t.Helper()
+	m := newTestModel(t, 120, 40)
+	m.hasAuth = true
+	m.cfg.AuthBrowser = browser
+	m.reimportFn = fn
+	return m
+}
+
+// TestAutoRefresh_signedInStubFlipsIndicator: an anonymous startup check fires a
+// one-shot re-import; a signed-in stub flips the indicator to signed-in and
+// toasts "session refreshed from <browser>".
+func TestAutoRefresh_signedInStubFlipsIndicator(t *testing.T) {
+	var gotBrowser string
+	m := staleModel(t, "chrome", func(browser string, _ int) reimportMsg {
+		gotBrowser = browser
+		return reimportMsg{browser: browser, client: ytm.NewClient(nil), name: "Felipe Kallas", signedIn: true}
+	})
+
+	// Anonymous startup result => a reimport Cmd is returned.
+	updated, cmd := m.Update(accountInfoMsg{signedIn: false})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a reimport Cmd after an anonymous check")
+	}
+
+	// Run the Cmd (the injected stub) and feed its message back.
+	m = send(m, cmd())
+	if gotBrowser != "chrome" {
+		t.Errorf("reimport called with browser %q, want chrome", gotBrowser)
+	}
+	if !m.authSignedIn || m.authName != "Felipe Kallas" {
+		t.Fatalf("indicator did not flip to signed-in: signedIn=%v name=%q", m.authSignedIn, m.authName)
+	}
+	if !strings.Contains(m.status, "session refreshed from chrome") || m.statusErr {
+		t.Errorf("status = %q (err=%v), want refreshed toast", m.status, m.statusErr)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "● Felipe Kallas") {
+		t.Errorf("view missing refreshed signed-in indicator")
+	}
+}
+
+// TestAutoRefresh_failingStubFallbackToast: a failing import stub leaves the
+// session anonymous and toasts the run-the-command fallback hint.
+func TestAutoRefresh_failingStubFallbackToast(t *testing.T) {
+	m := staleModel(t, "firefox", func(browser string, _ int) reimportMsg {
+		return reimportMsg{browser: browser, err: errors.New("no cookie store")}
+	})
+
+	updated, cmd := m.Update(accountInfoMsg{signedIn: false})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a reimport Cmd after an anonymous check")
+	}
+	m = send(m, cmd())
+
+	if m.authSignedIn {
+		t.Error("session should still be anonymous after a failed re-import")
+	}
+	if !strings.Contains(m.status, "re-import failed — run tubeamp -auth firefox") || !m.statusErr {
+		t.Errorf("status = %q (err=%v), want fallback hint", m.status, m.statusErr)
+	}
+}
+
+// TestAutoRefresh_firesAtMostOnce: a second anonymous result (e.g. a later
+// library load that comes back logged out) must NOT fire another re-import.
+func TestAutoRefresh_firesAtMostOnce(t *testing.T) {
+	var calls int
+	m := staleModel(t, "chrome", func(browser string, _ int) reimportMsg {
+		calls++
+		return reimportMsg{browser: browser, err: errors.New("denied")}
+	})
+
+	// First anonymous trigger fires the re-import.
+	updated, cmd := m.Update(accountInfoMsg{signedIn: false})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("first anonymous check should fire a reimport Cmd")
+	}
+	m = send(m, cmd())
+
+	// A later anonymous library load must not fire a second one.
+	m.plGen = 1
+	updated2, cmd2 := m.Update(libPlaylistsMsg{gen: 1, err: ytm.ErrNotSignedIn})
+	m = updated2.(Model)
+	if cmd2 != nil {
+		t.Error("a second anonymous result should not fire another reimport")
+	}
+	if calls != 1 {
+		t.Errorf("reimport called %d times, want exactly 1", calls)
+	}
+}
+
+// TestAutoRefresh_skippedWithoutBrowser: with no remembered browser, an anonymous
+// result fires no re-import (and reimportFn is never consulted).
+func TestAutoRefresh_skippedWithoutBrowser(t *testing.T) {
+	called := false
+	m := newTestModel(t, 120, 40)
+	m.hasAuth = true // auth file present, but no AuthBrowser remembered
+	m.reimportFn = func(string, int) reimportMsg { called = true; return reimportMsg{} }
+
+	_, cmd := m.Update(accountInfoMsg{signedIn: false})
+	if cmd != nil {
+		t.Error("no reimport Cmd should fire without a remembered browser")
+	}
+	if called {
+		t.Error("reimportFn must not run without a remembered browser")
+	}
+}
+
+// TestAutoRefresh_skippedWithoutAuthFile: a remembered browser but no auth file
+// (a machine that never signed in) fires no re-import.
+func TestAutoRefresh_skippedWithoutAuthFile(t *testing.T) {
+	m := newTestModel(t, 120, 40) // nil client => hasAuth false
+	m.cfg.AuthBrowser = "chrome"
+	m.reimportFn = func(string, int) reimportMsg { return reimportMsg{} }
+
+	_, cmd := m.Update(accountInfoMsg{signedIn: false})
+	if cmd != nil {
+		t.Error("no reimport Cmd should fire without an auth file present")
 	}
 }

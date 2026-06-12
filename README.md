@@ -123,7 +123,36 @@ header stored in a plain-text file:
 ~/.local/share/tubeamp/auth          # or $XDG_DATA_HOME/tubeamp/auth
 ```
 
-**Getting the Cookie header**
+**Recommended: import from your browser (one command)**
+
+If you are already logged into YouTube Music in a browser, sign in with a single
+command — tubeamp reads the sign-in cookies straight out of the browser's cookie
+store and writes the auth file for you:
+
+```sh
+tubeamp -auth chrome     # or: chromium, edge, brave, firefox, safari
+tubeamp -auth            # bare -auth = "auto": try every supported browser
+```
+
+It then confirms with the live API and prints `signed in as <name>` (or, if the
+cookies still resolve logged out, `imported, but YouTube still resolved
+anonymous — are you logged into <browser>?`). The browser you import from is
+remembered in `config.yaml` (`auth_browser`), and the TUI uses it to silently
+re-import a session that has gone stale (see the rotation note below). A running
+browser does not block the read — tubeamp reads through a temporary copy of the
+(locked) cookie database.
+
+- **macOS Keychain prompt.** Chrome-family cookies (Chrome/Chromium/Edge/Brave)
+  are encrypted with a key kept in your login Keychain, so the first Chrome
+  import pops a Keychain consent dialog — allow it. Deny it and tubeamp reports a
+  clear error rather than a cryptic decryption failure.
+- **App-Bound Encryption caveat.** Very recent Chrome releases wrap the cookie
+  key in app-bound encryption that refuses external reads. If `-auth chrome`
+  fails to decrypt, use **Firefox** (`-auth firefox`) or **Safari**
+  (`-auth safari`) — neither store is Keychain-encrypted — or fall back to the
+  manual method below.
+
+**Fallback: copy the Cookie header by hand**
 
 1. Open <https://music.youtube.com> in your browser and make sure you are logged in.
 2. Open the developer tools (F12) → **Network** tab.
@@ -154,7 +183,17 @@ tubeamp silently falls back to anonymous (which is exactly what the `○ anonymo
 indicator is for). If the rotation happens mid-session — sign-in succeeded at
 startup but a later library load comes back logged out — the indicator
 downgrades to `○ anonymous` on the spot instead of contradicting the failing
-loads. The reliable trick is to copy the cookie from a **private /
+loads.
+
+**Auto-refresh from the browser.** When a session resolves anonymous and you
+imported it with `-auth`, the TUI fires a one-shot re-import from the remembered
+browser (`auth_browser`) — reading fresh cookies, rewriting the auth file, and
+re-checking — at most once per session. On success the status line shows
+`session refreshed from <browser>` and the indicator flips back to signed-in; on
+failure it shows `re-import failed — run tubeamp -auth <browser>`. So as long as
+the browser is still logged in, a stale tubeamp session usually heals itself.
+
+The reliable manual trick is to copy the cookie from a **private /
 incognito** window: log in there, grab the Cookie header, then **close the window
 without logging out**. A closed incognito session is not rotated, so that cookie
 keeps working far longer.

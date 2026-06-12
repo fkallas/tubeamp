@@ -26,6 +26,10 @@ type Config struct {
 	YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
 	ArtPalette string `yaml:"art_palette"` // "auto" (default) or "theme"
 	AuthUser   int    `yaml:"auth_user"`   // X-Goog-AuthUser account index, default 0
+	// AuthBrowser remembers the browser a sign-in was last imported from
+	// (tubeamp -auth <browser>). When set, the UI can re-import from it to
+	// refresh a session that has gone stale. Empty means no import source.
+	AuthBrowser string `yaml:"auth_browser"`
 }
 
 // Default returns the default configuration.

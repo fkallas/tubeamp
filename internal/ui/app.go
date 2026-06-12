@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fkallas/tubeamp/internal/art"
+	"github.com/fkallas/tubeamp/internal/auth"
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
 	"github.com/fkallas/tubeamp/internal/model"
@@ -186,6 +188,16 @@ type Model struct {
 	authChecked  bool
 	authSignedIn bool
 	authName     string
+
+	// Stale-session auto-refresh. When a startup AccountInfo (or a library load)
+	// resolves anonymous while cfg.AuthBrowser is set and an auth file exists, the
+	// model fires a ONE-SHOT re-import from that browser (reimportFn). reimportTried
+	// guards against a reimport loop — it happens at most once per session.
+	// reimportFn is the injectable seam: it reads the browser, rewrites the auth
+	// file, rebuilds a client, and confirms with AccountInfo, returning the result;
+	// tests stub it so no browser or network is touched.
+	reimportFn    reimportFunc
+	reimportTried bool
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -211,6 +223,7 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		albumArtInflight: map[string]struct{}{},
 		volume:           cfg.Volume,
 		hasAuth:          c != nil && c.Authenticated(),
+		reimportFn:       defaultReimport,
 	}
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
@@ -345,6 +358,23 @@ type accountInfoMsg struct {
 	err      error
 }
 
+// reimportMsg carries the result of a one-shot stale-session re-import: a fresh
+// client built from the re-imported cookies plus the AccountInfo it resolved to.
+// err is non-nil when the import or write failed; signedIn is false when the
+// re-imported cookies still resolved anonymous.
+type reimportMsg struct {
+	browser  string
+	client   *ytm.Client
+	name     string
+	signedIn bool
+	err      error
+}
+
+// reimportFunc is the injectable browser re-import operation. Given a browser and
+// the account index, it imports cookies, rewrites the auth file, rebuilds a
+// client, and confirms via AccountInfo, returning the outcome as a reimportMsg.
+type reimportFunc func(browser string, authUser int) reimportMsg
+
 // libPlaylistsMsg carries the one-shot LibraryPlaylists result that fills the
 // Playlists panel for a signed-in session. gen ties it to the plGen that issued
 // it; err is ytm.ErrNotSignedIn for an anonymous session (mock data is kept).
@@ -472,6 +502,47 @@ func accountInfoCmd(c *ytm.Client) tea.Cmd {
 		name, signedIn, err := c.AccountInfo(ctx)
 		return accountInfoMsg{name: name, signedIn: signedIn, err: err}
 	}
+}
+
+// defaultReimport is the production reimportFunc: it imports the browser's
+// cookies, rewrites the auth file via ytm's shared atomic 0600 writer, rebuilds a
+// client bound to that file (so future rotations persist), and confirms the
+// session with a bounded AccountInfo probe.
+func defaultReimport(browser string, authUser int) reimportMsg {
+	header, err := auth.ImportFromBrowser(browser)
+	if err != nil {
+		return reimportMsg{browser: browser, err: err}
+	}
+	path := filepath.Join(config.DataDir(), "auth")
+	if err := ytm.WriteAuthFile(path, header); err != nil {
+		return reimportMsg{browser: browser, err: err}
+	}
+	a, err := ytm.LoadAuth(path)
+	if err != nil {
+		return reimportMsg{browser: browser, err: err}
+	}
+	c := ytm.NewClient(a)
+	c.SetAuthUser(authUser)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name, signedIn, err := c.AccountInfo(ctx)
+	return reimportMsg{browser: browser, client: c, name: name, signedIn: signedIn, err: err}
+}
+
+// maybeReimportCmd fires the one-shot stale-session re-import when it is warranted
+// and has not run yet: a remembered import browser (cfg.AuthBrowser), an auth file
+// already present (hasAuth), and reimportTried still false. It flips reimportTried
+// so the re-import happens at most once per session (no reimport loop), and
+// returns nil when any precondition is unmet.
+func (m *Model) maybeReimportCmd() tea.Cmd {
+	if m.reimportTried || m.cfg == nil || m.cfg.AuthBrowser == "" || !m.hasAuth {
+		return nil
+	}
+	m.reimportTried = true
+	fn := m.reimportFn
+	browser := m.cfg.AuthBrowser
+	authUser := m.cfg.AuthUser
+	return func() tea.Msg { return fn(browser, authUser) }
 }
 
 // libraryPlaylistsCmd fetches the signed-in user's playlists for the Playlists
@@ -734,12 +805,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authSignedIn = msg.signedIn
 		m.authName = msg.name
 		// Now that we know the session is live, fill the Playlists panel with the
-		// user's real playlists. An anonymous session keeps the mock data.
+		// user's real playlists. An anonymous session keeps the mock data — but if
+		// we remember a browser to re-import from, try a one-shot refresh first.
 		if msg.signedIn && m.c != nil {
 			m.plGen++
 			return m, libraryPlaylistsCmd(m.c, m.plGen)
 		}
-		return m, nil
+		return m, m.maybeReimportCmd()
 
 	case libPlaylistsMsg:
 		if msg.gen != m.plGen {
@@ -749,9 +821,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
 				m.downgradeAuth()
 				m.setError("sign in to load your library — see README")
-			} else {
-				m.setError("could not load playlists: " + msg.err.Error())
+				// The cookie rotated mid-session; try a one-shot refresh from the
+				// remembered browser (replaces the hint on success).
+				return m, m.maybeReimportCmd()
 			}
+			m.setError("could not load playlists: " + msg.err.Error())
 			return m, nil // keep the mock playlists
 		}
 		m.playlists = msg.playlists
@@ -769,14 +843,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(msg.err, ytm.ErrNotSignedIn) {
 				m.downgradeAuth()
 				m.setError("sign in to load your library — see README")
-			} else {
-				m.setError("could not load " + msg.title + ": " + msg.err.Error())
+				// The cookie rotated mid-session; try a one-shot refresh from the
+				// remembered browser (replaces the hint on success).
+				return m, m.maybeReimportCmd()
 			}
+			m.setError("could not load " + msg.title + ": " + msg.err.Error())
 			return m, nil // keep the current (mock) view
 		}
 		m.status = ""
 		m.setMain(msg.title, msg.tracks)
 		m.setFocus(focusMain)
+		return m, nil
+
+	case reimportMsg:
+		// A failed import/write or a still-anonymous result falls back to a hint
+		// to run the explicit command; never retried (reimportTried stays set).
+		if msg.err != nil || !msg.signedIn {
+			m.setError("re-import failed — run tubeamp -auth " + msg.browser)
+			return m, nil
+		}
+		// Success: adopt the fresh client, flip the indicator to signed-in, and
+		// fill the Playlists panel just like the startup sign-in path does.
+		if msg.client != nil {
+			m.c = msg.client
+			m.hasAuth = true
+		}
+		m.authChecked = true
+		m.authSignedIn = true
+		m.authName = msg.name
+		m.setStatus("session refreshed from " + msg.browser)
+		if m.c != nil {
+			m.plGen++
+			return m, libraryPlaylistsCmd(m.c, m.plGen)
+		}
 		return m, nil
 	}
 

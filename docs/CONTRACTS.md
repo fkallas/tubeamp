@@ -21,7 +21,9 @@ it in your report — do not silently deviate.
   `github.com/charmbracelet/lipgloss`, `github.com/charmbracelet/bubbles/key`,
   `github.com/charmbracelet/bubbles/textinput`,
   `github.com/charmbracelet/x/ansi` (ANSI-aware splicing in the overlay
-  compositor; already in the module graph via lipgloss), `gopkg.in/yaml.v3`.
+  compositor; already in the module graph via lipgloss), `gopkg.in/yaml.v3`,
+  and `github.com/browserutils/kooky` (+ transitive deps) — used ONLY by
+  `internal/auth` to read browser cookie stores for `tubeamp -auth`.
 - Compile and test your own package before finishing:
   `go build ./internal/<pkg>/...` and `go test ./internal/<pkg>/...`.
   Run `gofmt -w` on your files.
@@ -62,6 +64,8 @@ type Config struct {
     YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
     ArtPalette string `yaml:"art_palette"` // ArtPaletteAuto (default) or ArtPaletteTheme
     AuthUser   int    `yaml:"auth_user"`   // X-Goog-AuthUser account index, default 0 (multi-account)
+    AuthBrowser string `yaml:"auth_browser"` // browser a sign-in was imported from (tubeamp -auth); ""=none.
+                                              // Lets the UI re-import to refresh a stale session.
 }
 
 const (
@@ -322,6 +326,10 @@ type Auth struct {
 }
 func LoadAuth(path string) (*Auth, error) // plain-text file, one line; DataDir()/auth by convention;
                                           // binds path so rotated cookies persist back there
+func WriteAuthFile(path, cookieHeader string) error // SHARED atomic 0600 writer (same path Auth uses to
+                                          // persist rotations); creates the parent dir 0700; trims +
+                                          // appends a newline; rejects an empty header. Used by the
+                                          // browser-import flow so the file write is not duplicated.
 func (a *Auth) SAPISID() (string, error)  // from the LIVE set (SAPISID or __Secure-3PAPISID); a rotated value takes effect
 func (a *Auth) Header() string            // current Cookie header to send (live merged set, canonical order)
 func (a *Auth) Generation() uint64        // bumps on every absorbed rotation; UI polls it on its auth re-check (no goroutine/channel)
@@ -411,6 +419,40 @@ credential-free anonymous live tests (gated on `TUBEAMP_LIVE=1`).
 `library_playlists.json` / `playlist_tracks.json` are handcrafted (grid +
 playlist-shelf), each with one malformed item skipped.
 
+## internal/auth
+
+One-command sign-in by importing the YouTube/Google cookies from a local browser
+profile (via `github.com/browserutils/kooky`), so users do not hand-copy a Cookie
+header out of devtools. `AssembleCookieHeader` (pure, fixture-tested) is split
+from `ImportFromBrowser` (kooky-backed) so the header assembly can be unit-tested
+without a real browser.
+
+```go
+// AssembleCookieHeader builds the canonical "name=value; …" Cookie header from a
+// set of browser cookies: dedupe by name (first non-empty wins), drop empties,
+// emit known sign-in cookies in a fixed canonical order then extras alphabetically.
+// Returns ErrNoSAPISID when no SAPISID/__Secure-3PAPISID is present (logged-out /
+// undecryptable set) — this is the typed "no usable cookie set" signal.
+func AssembleCookieHeader(cookies []*http.Cookie) (string, error)
+
+// ImportFromBrowser reads the YouTube/Google sign-in cookies (domains
+// music.youtube.com / .youtube.com / .google.com) from the named browser's store
+// and assembles the Cookie header. browser ∈ {chrome,chromium,edge,brave,firefox,
+// safari}; "" or "auto" tries every supported store and returns the first that
+// yields a SAPISID. kooky reads locked SQLite stores through a temp copy (a
+// running browser does not block it). On macOS the Chrome family needs Keychain
+// access to decrypt; a denial (or Chrome app-bound encryption) is surfaced as a
+// clear, actionable error. ErrNoStore when no store is found for the browser;
+// an error wrapping ErrNoSAPISID when stores exist but none holds a session.
+func ImportFromBrowser(browser string) (cookieHeader string, err error)
+
+var ErrNoSAPISID = errors.New(...) // no signing cookie in the set
+var ErrNoStore   = errors.New(...) // no cookie store found for the browser
+```
+
+A real-browser read is gated behind `TUBEAMP_LIVE_IMPORT=1` (`t.Skip` by default,
+optional `TUBEAMP_LIVE_IMPORT_BROWSER`); it never logs the cookie value.
+
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 
 ```go
@@ -465,6 +507,20 @@ see README" in Muted; no auth file => "○ not signed in" in Muted. A failed che
 later returns `ErrNotSignedIn` downgrades the resolved state to anonymous (the
 cookie rotated mid-session), flipping the indicator to the stale-cookie hint.
 Tests inject the result via `accountInfoMsg`, never the network.
+
+**Stale-session auto-refresh.** When the resolved state is anonymous (the startup
+`AccountInfo`, or a library browse via the downgrade path) AND `cfg.AuthBrowser`
+is set AND an auth file is present (`hasAuth`), the model fires a ONE-SHOT
+re-import `Cmd` — guarded by `reimportTried` so it happens at most once per
+session (no reimport loop). The Cmd runs the injectable `reimportFn`
+(default `defaultReimport`: `auth.ImportFromBrowser(cfg.AuthBrowser)` →
+`ytm.WriteAuthFile` → `LoadAuth` → rebuild `Client` → `AccountInfo`), returning a
+`reimportMsg`. On a signed-in result the model adopts the fresh client, flips the
+indicator to signed-in, toasts `session refreshed from <browser>`, and fills the
+Playlists panel; on failure/anonymous it toasts
+`re-import failed — run tubeamp -auth <browser>`. The re-import never blocks
+`Update` (it is a `tea.Cmd`). Tests inject `reimportFn` as a stub (signed-in stub
+⇒ indicator flips + toast; failing stub ⇒ fallback toast; fires at most once).
 
 Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 (items + border), Playlists/Queue split the rest. Player bar 4 content lines.
@@ -604,6 +660,17 @@ Tests inject `libPlaylistsMsg` / `libTracksMsg` (and `accountInfoMsg`); the real
 browses never run from tests. Mock data lives in `internal/ui/mock.go`.
 
 ## cmd/tubeamp
+
+`auth.go`: `-auth <browser>` runs the one-command browser import and exits (it
+does not open the TUI or touch the daemon). It imports via `auth.ImportFromBrowser`
+(stubbable `authImport` package var), writes the auth file with the shared
+`ytm.WriteAuthFile`, persists the browser as `cfg.AuthBrowser`, then confirms with
+a bounded `AccountInfo` (stubbable `confirmSignIn` var) — printing
+`signed in as <name>` or `imported, but YouTube still resolved anonymous — are you
+logged into <browser>?`. NEVER prints cookie values. The `-auth` flag accepts a
+value (`-auth chrome`, `-auth=chrome`) and stands alone (bare `-auth` ⇒ "auto"
+via a custom `flag.Value` with `IsBoolFlag`; the space form `-auth chrome` is
+recovered from the trailing positional).
 
 `main.go`: parse flags; `config.Load`. With no control flag set it runs the TUI:
 `-theme <name>` override, `-version`; `theme.Load` (fall back to `theme.Default()`

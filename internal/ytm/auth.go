@@ -219,6 +219,24 @@ func serializeCookies(order []string, jar map[string]string) string {
 	return strings.Join(parts, "; ")
 }
 
+// WriteAuthFile writes a Cookie header to the auth file at path using the SAME
+// atomic, 0600 write path Auth uses to persist rotated cookies (atomicWriteFile),
+// so the browser-import flow and the live cookie-jar share one writer instead of
+// duplicating it. The header is trimmed and given a trailing newline to match the
+// single-line shape LoadAuth reads back. An empty header is rejected.
+func WriteAuthFile(path, cookieHeader string) error {
+	header := strings.TrimSpace(cookieHeader)
+	if header == "" {
+		return fmt.Errorf("ytm.WriteAuthFile: empty cookie header")
+	}
+	// The data dir may not exist yet on a first sign-in; create it 0700 since it
+	// holds the credential. A no-op once it exists (e.g. on rotation rewrites).
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("ytm.WriteAuthFile: create dir: %w", err)
+	}
+	return atomicWriteFile(path, []byte(header+"\n"))
+}
+
 // atomicWriteFile writes data to path via a temp file in the same directory and a
 // rename, so a concurrent reader never sees a half-written auth file. The file is
 // created 0600 (it holds a credential).
