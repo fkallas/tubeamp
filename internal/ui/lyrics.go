@@ -50,11 +50,11 @@ type lyricResult struct {
 	found  bool
 }
 
-// lyricsMsg carries an async lyrics-lookup result back into Update. gen ties it
-// to the lyricsGen that issued the fetch (the generation guard); videoID keys
-// the cache so replays/seeks reuse it.
+// lyricsMsg carries an async lyrics-lookup result back into Update. videoID
+// keys the cache so replays/seeks reuse it. No generation guard is needed: the
+// cache is keyed by videoID and only the CURRENT track's entry is ever
+// displayed, so a late result is always valid for its own key.
 type lyricsMsg struct {
-	gen     int
 	videoID string
 	ly      lyrics.Lyrics
 	found   bool
@@ -85,20 +85,21 @@ func fetchLyrics(ctx context.Context, c *ytm.Client, t model.Track) (lyrics.Lyri
 
 // fetchLyricsCmd looks up the track's lyrics off the Update goroutine, bounded by
 // an ~8s context, and reports the result as a lyricsMsg.
-func fetchLyricsCmd(c *ytm.Client, t model.Track, gen int) tea.Cmd {
+func fetchLyricsCmd(c *ytm.Client, t model.Track) tea.Cmd {
 	vid := t.VideoID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		ly, found := lyricsFetch(ctx, c, t)
-		return lyricsMsg{gen: gen, videoID: vid, ly: ly, found: found}
+		return lyricsMsg{videoID: vid, ly: ly, found: found}
 	}
 }
 
 // ensureLyrics makes sure the now-playing track's lyrics are loading or loaded.
 // A track already in the cache (resolved or in flight) is reused — replays and
-// seeks never refetch. Only a genuinely new track bumps lyricsGen (the stale
-// guard) and dispatches a fetch.
+// seeks never refetch. Only a genuinely new track dispatches a fetch (the
+// loading cache entry itself dedupes in-flight lookups, so at most one fetch
+// per videoID ever runs).
 func (m *Model) ensureLyrics() tea.Cmd {
 	if !m.hasNow {
 		return nil
@@ -107,24 +108,19 @@ func (m *Model) ensureLyrics() tea.Cmd {
 	if _, ok := m.lyricsCache[vid]; ok {
 		return nil
 	}
-	m.lyricsGen++
 	m.lyricsCache[vid] = lyricResult{status: lyricLoading}
-	return fetchLyricsCmd(m.c, m.nowPlaying, m.lyricsGen)
+	return fetchLyricsCmd(m.c, m.nowPlaying)
 }
 
-// applyLyrics folds a lyrics result into the cache. The result is cached by
-// videoID so a replay/seek reuses it. A stale generation whose track we have
-// already moved past is dropped; a result that still matches the current track
-// is always recorded, even if a newer fetch bumped the generation (so a brief
-// switch-away-and-back never leaves the panel stuck "searching").
+// applyLyrics folds a lyrics result into the cache, replacing the loading entry
+// ensureLyrics seeded, so a replay/seek reuses it. The result is ALWAYS
+// recorded — even for a track we have moved past — because the cache is keyed
+// by videoID and only the current track's entry is displayed: a late result is
+// always valid for its own key, and dropping it would leave that key stuck on
+// the loading entry forever (ensureLyrics would treat it as a hit and never
+// refetch, sticking the panel on "searching for lyrics…" when the user returns
+// to the track).
 func (m *Model) applyLyrics(msg lyricsMsg) {
-	curVid := ""
-	if m.hasNow {
-		curVid = m.nowPlaying.VideoID
-	}
-	if msg.gen != m.lyricsGen && msg.videoID != curVid {
-		return
-	}
 	m.lyricsCache[msg.videoID] = lyricResult{status: lyricResolved, ly: msg.ly, found: msg.found}
 }
 

@@ -701,16 +701,20 @@ Queue/Main).
 - **Sync source.** The highlighted line is driven off the SAME playback position
   the progress bar uses (`m.timePos`, updated by `EvTimePos`), via
   `lyrics.CurrentLine` — no new event wiring.
-- **Fetch + cache + guard.** On a track change (new videoID) the lyrics state is
+- **Fetch + cache.** On a track change (new videoID) the lyrics state is
   set to "loading" and a `tea.Cmd` (never blocking `Update`) calls
   `lyrics.FetchLRCLIB` (8s ctx); on `lyrics.ErrNoLyrics` it falls back to
   `ytm.Client.Lyrics` (plain text) when the client is non-nil. Resolved results
-  are cached by videoID (`lyricsCache`) so replays/seeks never refetch. A
-  generation guard (`lyricsGen`, like `searchGen`/`albumGen`) drops a late result
-  for a track already moved past; a result still matching the current track is
-  recorded regardless (so a brief switch-away-and-back never sticks on
-  "searching"). nil player / nil client paths never panic. The lookup itself is
-  behind the injectable `lyricsFetch` package var so tests never hit the network.
+  are cached by videoID (`lyricsCache`) so replays/seeks never refetch; the
+  loading entry itself dedupes in-flight lookups (at most one fetch per videoID
+  ever runs). There is deliberately NO generation guard (unlike
+  `searchGen`/`albumGen`): the cache is keyed by videoID and only the CURRENT
+  track's entry is displayed, so a late result — even for a track already moved
+  past — is always valid for its own key and is recorded unconditionally
+  (dropping it would leave that key stuck on its loading entry, sticking the
+  panel on "searching" when the user returns to the track). nil player / nil
+  client paths never panic. The lookup itself is behind the injectable
+  `lyricsFetch` package var so tests never hit the network.
 
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 

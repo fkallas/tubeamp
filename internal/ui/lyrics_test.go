@@ -176,28 +176,55 @@ func TestLyricsFetchNilClientNoPanic(t *testing.T) {
 	}
 }
 
-// TestLyricsStaleResultIgnored: a lyrics result for a generation we have moved
-// past — and a track no longer playing — is dropped.
-func TestLyricsStaleResultIgnored(t *testing.T) {
-	m := newTestModel(t, 120, 40)
-	m.hasNow = true
-	m.nowPlaying = model.Track{VideoID: "current"}
-	m.lyricsGen = 5
-	m.lyricsCache["current"] = lyricResult{status: lyricLoading}
+// TestLyricsLateResultCachedAfterSkip: a lyrics result that lands AFTER the
+// user skipped to another track is still recorded under its own videoID
+// (the cache is keyed, only the current track's entry is displayed, so a late
+// result is always valid for its key). Returning to the track must show the
+// lyrics — never stick on "searching for lyrics…" — and must not refetch.
+func TestLyricsLateResultCachedAfterSkip(t *testing.T) {
+	stubbed := false
+	orig := lyricsFetch
+	lyricsFetch = func(_ context.Context, _ *ytm.Client, _ model.Track) (lyrics.Lyrics, bool) {
+		stubbed = true
+		return lyrics.Lyrics{}, false
+	}
+	defer func() { lyricsFetch = orig }()
 
-	// A late result for an old track at an old generation must be ignored.
-	m = send(m, lyricsMsg{gen: 4, videoID: "old", found: true,
-		ly: lyrics.Lyrics{Plain: "old lyrics"}})
-	if _, ok := m.lyricsCache["old"]; ok {
-		t.Errorf("stale lyrics result for a previous track should be dropped")
+	m := newTestModel(t, 120, 40)
+
+	// Play track A: ensureLyrics seeds the loading entry and dispatches a fetch.
+	m.hasNow = true
+	m.nowPlaying = model.Track{VideoID: "a", Title: "Track A"}
+	if cmd := m.ensureLyrics(); cmd == nil {
+		t.Fatal("ensureLyrics dispatched no fetch for track A")
 	}
 
-	// A result for the current track is recorded even if its generation is stale
-	// (e.g. switched away and back while the fetch was in flight).
-	m = send(m, lyricsMsg{gen: 4, videoID: "current", found: true,
-		ly: lyrics.Lyrics{Plain: "cur lyrics"}})
-	if r, ok := m.lyricsCache["current"]; !ok || r.status != lyricResolved {
-		t.Errorf("current-track result should be recorded; got %+v", r)
+	// Skip to track B before A's result lands.
+	m.nowPlaying = model.Track{VideoID: "b", Title: "Track B"}
+	_ = m.ensureLyrics()
+
+	// A's late result arrives while B is playing: it must be recorded.
+	m = send(m, lyricsMsg{videoID: "a", found: true,
+		ly: lyrics.Lyrics{Plain: "A LYRICS", Source: lyrics.SourceYTMusic}})
+	if r, ok := m.lyricsCache["a"]; !ok || r.status != lyricResolved {
+		t.Fatalf("late result for a moved-past track should be cached; got %+v, ok=%v", r, ok)
+	}
+
+	// Return to track A: cache hit (no refetch), lyrics render — not "searching".
+	m.nowPlaying = model.Track{VideoID: "a", Title: "Track A"}
+	stubbed = false
+	if cmd := m.ensureLyrics(); cmd != nil {
+		cmd()
+		if stubbed {
+			t.Errorf("returning to a cached track must not refetch")
+		}
+	}
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "searching for lyrics…") {
+		t.Errorf("track A stuck on the loading notice after its late result:\n%s", v)
+	}
+	if !strings.Contains(v, "A LYRICS") {
+		t.Errorf("track A's cached lyrics should render:\n%s", v)
 	}
 }
 

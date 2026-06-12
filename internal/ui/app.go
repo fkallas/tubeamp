@@ -206,11 +206,11 @@ type Model struct {
 	reimportTried bool
 
 	// Synced-lyrics panel (pure display, never focusable). Resolved lyrics are
-	// cached by videoID so a replay/seek never refetches; lyricsGen is the
-	// stale-fetch guard (like searchGen/albumGen). The highlighted line is driven
-	// off m.timePos via lyrics.CurrentLine — no extra event wiring.
+	// cached by videoID so a replay/seek never refetches (the loading entry
+	// dedupes in-flight fetches; results are always recorded — see applyLyrics).
+	// The highlighted line is driven off m.timePos via lyrics.CurrentLine — no
+	// extra event wiring.
 	lyricsCache map[string]lyricResult
-	lyricsGen   int
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -294,7 +294,7 @@ func (m Model) Init() tea.Cmd {
 		}
 		// Kick off the lyrics lookup for the already-playing (attached) track.
 		m.lyricsCache[m.nowPlaying.VideoID] = lyricResult{status: lyricLoading}
-		cmds = append(cmds, fetchLyricsCmd(m.c, m.nowPlaying, m.lyricsGen))
+		cmds = append(cmds, fetchLyricsCmd(m.c, m.nowPlaying))
 	}
 	// One-shot sign-in check: surfaces the account name (or a stale-cookie
 	// warning) in the logo/status area. No re-check is issued.
