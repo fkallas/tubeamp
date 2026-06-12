@@ -1,0 +1,11 @@
+name: catppuccin-latte
+colors:
+  border_inactive: "#9ca0b0"
+  border_active: "#8839ef"
+  text_primary: "#4c4f69"
+  text_muted: "#8c8fa1"
+  accent: "#8839ef"
+  playing: "#40a02b"
+  error: "#d20f39"
+  selection_bg: "#acb0be"
+  selection_fg: "#4c4f69"

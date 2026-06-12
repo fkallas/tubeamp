@@ -1,0 +1,11 @@
+name: dracula
+colors:
+  border_inactive: "#44475a"
+  border_active: "#bd93f9"
+  text_primary: "#f8f8f2"
+  text_muted: "#6272a4"
+  accent: "#bd93f9"
+  playing: "#50fa7b"
+  error: "#ff5555"
+  selection_bg: "#44475a"
+  selection_fg: "#f8f8f2"

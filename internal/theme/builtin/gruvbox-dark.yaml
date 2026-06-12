@@ -1,0 +1,11 @@
+name: gruvbox-dark
+colors:
+  border_inactive: "#3c3836"
+  border_active: "#fabd2f"
+  text_primary: "#ebdbb2"
+  text_muted: "#928374"
+  accent: "#fabd2f"
+  playing: "#b8bb26"
+  error: "#fb4934"
+  selection_bg: "#504945"
+  selection_fg: "#ebdbb2"

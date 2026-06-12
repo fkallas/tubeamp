@@ -1,0 +1,11 @@
+name: tokyo-night
+colors:
+  border_inactive: "#414868"
+  border_active: "#7aa2f7"
+  text_primary: "#c0caf5"
+  text_muted: "#565f89"
+  accent: "#7aa2f7"
+  playing: "#9ece6a"
+  error: "#f7768e"
+  selection_bg: "#283457"
+  selection_fg: "#c0caf5"

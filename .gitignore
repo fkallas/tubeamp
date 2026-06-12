@@ -1,0 +1,14 @@
+# Build output
+/tubeamp
+/dist/
+
+# OS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+
+# Local auth/secrets must never be committed
+auth
+*.cookie

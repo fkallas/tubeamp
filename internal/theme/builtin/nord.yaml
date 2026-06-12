@@ -1,0 +1,11 @@
+name: nord
+colors:
+  border_inactive: "#434c5e"
+  border_active: "#88c0d0"
+  text_primary: "#d8dee9"
+  text_muted: "#616e88"
+  accent: "#88c0d0"
+  playing: "#a3be8c"
+  error: "#bf616a"
+  selection_bg: "#3b4252"
+  selection_fg: "#d8dee9"
