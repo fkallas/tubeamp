@@ -17,6 +17,8 @@ type KeyMap struct {
 	FocusNext key.Binding
 	Up        key.Binding
 	Down      key.Binding
+	HalfPgUp  key.Binding
+	HalfPgDn  key.Binding
 	Top       key.Binding
 	Bottom    key.Binding
 
@@ -59,6 +61,8 @@ func Default() KeyMap {
 		FocusNext: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "next panel")),
 		Up:        key.NewBinding(key.WithKeys("k"), key.WithHelp("k", "up")),
 		Down:      key.NewBinding(key.WithKeys("j"), key.WithHelp("j", "down")),
+		HalfPgUp:  key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "half page up")),
+		HalfPgDn:  key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "half page down")),
 		Top:       key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
 		Bottom:    key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
 
@@ -93,7 +97,7 @@ func Default() KeyMap {
 // group order matches HelpGroupTitles.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Focus1, k.Focus2, k.Focus3, k.Focus4, k.FocusPrev, k.FocusNext, k.Up, k.Down, k.Top, k.Bottom},
+		{k.Focus1, k.Focus2, k.Focus3, k.Focus4, k.FocusPrev, k.FocusNext, k.Up, k.Down, k.HalfPgUp, k.HalfPgDn, k.Top, k.Bottom},
 		{k.Enter, k.Space, k.Next, k.Prev, k.SeekBack, k.SeekFwd, k.VolUp, k.VolDown, k.Mute},
 		{k.Append, k.InsertNext, k.Open, k.Remove, k.MoveUp, k.MoveDown, k.ClearQueue},
 		{k.Search, k.Theme, k.Help, k.Quit, k.Esc},

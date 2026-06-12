@@ -617,7 +617,10 @@ view; `h`/`l` cycle panel focus backward/forward (1→2→3→4, wrapping);
 `↑`/`↓` (also `+`/`=`/`-`) volume; `m` mute; `/` search overlay; `T` theme picker; `?` help
 overlay; `q`/`ctrl+c` quit; `esc` closes overlay / pops view stack.
 
-Per panel: `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
+Per panel: `j`/`k` move selection; `ctrl+d`/`ctrl+u` half-page down/up (clamped
+at list edges); `g/G` top/bottom; `enter` activates. A search-results frame
+whose cursor was never deliberately moved resets to the top when the
+songs/albums sections finish arriving.
 Library/Playlists `enter` → load tracks into the main view (see "Library &
 playlists" below for the real-vs-mock split). Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;

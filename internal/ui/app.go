@@ -91,6 +91,11 @@ type mainContent struct {
 	// it, so a later result (songs and albums arrive separately) updates the same
 	// frame instead of pushing a duplicate.
 	searchGen int
+	// cursorMoved records that the user actually navigated within this frame.
+	// When the songs section lands after the albums vertical, an untouched
+	// cursor resets to the top of the list; only a deliberate selection keeps
+	// its identity through the reorder.
+	cursorMoved bool
 }
 
 // Model is the root tea.Model for tubeamp.
@@ -706,11 +711,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		fr := m.ensureSearchFrame(msg.query)
 		// The songs section is about to be prepended and the albums reordered
-		// derived-first; when the albums vertical landed first and a row is
-		// highlighted, remember which album it is so the selection keeps its
-		// identity instead of silently becoming an unrelated song.
+		// derived-first. Only a selection the user deliberately made (cursorMoved)
+		// keeps its identity through the reorder; an untouched cursor resets to
+		// the top of the finished list instead of drifting to wherever the
+		// albums section ends up.
 		selAlbum := ""
-		if len(fr.tracks) == 0 && fr.cursor >= 0 && fr.cursor < len(fr.albums) {
+		if fr.cursorMoved && len(fr.tracks) == 0 && fr.cursor >= 0 && fr.cursor < len(fr.albums) {
 			selAlbum = fr.albums[fr.cursor].BrowseID
 		}
 		fr.tracks = msg.tracks
@@ -723,6 +729,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+		} else if !fr.cursorMoved {
+			fr.cursor = 0
 		}
 		return m, nil
 
@@ -980,6 +988,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(-1)
 	case key.Matches(msg, k.Down):
 		m.moveCursor(1)
+	case key.Matches(msg, k.HalfPgUp):
+		m.moveCursor(-m.halfPageRows())
+	case key.Matches(msg, k.HalfPgDn):
+		m.moveCursor(m.halfPageRows())
 	case key.Matches(msg, k.Top):
 		m.cursorToEdge(true)
 	case key.Matches(msg, k.Bottom):
@@ -1178,6 +1190,7 @@ func (m *Model) moveCursor(delta int) {
 	if *cur > n-1 {
 		*cur = n - 1
 	}
+	m.markCursorMoved()
 }
 
 func (m *Model) cursorToEdge(top bool) {
@@ -1190,6 +1203,26 @@ func (m *Model) cursorToEdge(top bool) {
 	} else {
 		*cur = n - 1
 	}
+	m.markCursorMoved()
+}
+
+// markCursorMoved records deliberate navigation on the top main-view frame, so
+// in-flight search results know whether to respect the selection (see
+// searchResultMsg).
+func (m *Model) markCursorMoved() {
+	if m.focus == focusMain {
+		m.stack[len(m.stack)-1].cursorMoved = true
+	}
+}
+
+// halfPageRows is the vim-style ctrl+d/ctrl+u jump distance: half the panel
+// area's height. Short lists simply clamp at their edges.
+func (m *Model) halfPageRows() int {
+	logoOff := 0
+	if m.height >= logoMinTermHeight {
+		logoOff = logoHeight
+	}
+	return max(1, (m.height-7-logoOff-2)/2)
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────

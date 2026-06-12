@@ -199,18 +199,30 @@ func TestHelpOverlayDoesNotBlankBackground(t *testing.T) {
 	if len(diffRows) == 0 {
 		t.Fatal("opening the overlay produced no visible change")
 	}
-	r := diffRows[len(diffRows)/2] // a row through the middle of the modal
-	br, or := []rune(base[r]), []rune(over[r])
-	lcp := 0
-	for lcp < len(br) && lcp < len(or) && br[lcp] == or[lcp] {
-		lcp++
+	// Across all rows the modal covers: every preserved left segment must be
+	// non-blank, and at least one must keep a left-column side border. (Checked
+	// over the union of covered rows rather than any single row, so the
+	// assertion does not depend on the modal's exact height.)
+	sawSideBorder := false
+	for _, r := range diffRows {
+		if r == len(base)-1 {
+			continue // the bottom hint line legitimately changes wholesale
+		}
+		br, or := []rune(base[r]), []rune(over[r])
+		lcp := 0
+		for lcp < len(br) && lcp < len(or) && br[lcp] == or[lcp] {
+			lcp++
+		}
+		if strings.TrimSpace(string(br[:lcp])) == "" {
+			t.Fatalf("row %d: overlay blanked the background left of the box\nbase: %q\nover: %q",
+				r, base[r], over[r])
+		}
+		if strings.Contains(string(br[:lcp]), "│") {
+			sawSideBorder = true
+		}
 	}
-	if strings.TrimSpace(string(br[:lcp])) == "" {
-		t.Fatalf("row %d: overlay blanked the background left of the box\nbase: %q\nover: %q",
-			r, base[r], over[r])
-	}
-	if !strings.Contains(string(br[:lcp]), "│") {
-		t.Errorf("row %d: preserved left segment has no left-column border: %q", r, string(br[:lcp]))
+	if !sawSideBorder {
+		t.Error("no covered row preserved a left-column side border left of the modal")
 	}
 }
 
@@ -461,6 +473,55 @@ func TestLateSearchResultUpdatesBuriedSearchFrame(t *testing.T) {
 	}
 	if got := len(m.stack[1].tracks); got != len(ts) {
 		t.Errorf("buried search frame got %d tracks, want %d", got, len(ts))
+	}
+}
+
+// TestSearchCursorStartsAtTop pins the fix for the cursor landing mid-list:
+// when the albums vertical arrives before the songs and the user never moved
+// the selection, the finished list must start at the top — not drift to
+// wherever the albums section ends up after the songs are prepended.
+func TestSearchCursorStartsAtTop(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+
+	m.searchGen = 2
+	m = send(m, albumSearchMsg{gen: 2, query: "x", albums: []model.Album{a}}) // albums land first
+	m = send(m, searchResultMsg{gen: 2, query: "x", tracks: ts})              // songs land second
+	if got := m.stack[len(m.stack)-1].cursor; got != 0 {
+		t.Errorf("untouched cursor after both results = %d, want 0 (top of list)", got)
+	}
+}
+
+// TestSearchCursorKeepsDeliberateAlbumSelection is the counterpart: a selection
+// the user actually navigated to keeps its identity through the reorder.
+func TestSearchCursorKeepsDeliberateAlbumSelection(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+
+	m.searchGen = 2
+	m = send(m, albumSearchMsg{gen: 2, query: "x", albums: []model.Album{a}})
+	m = send(m, runes("j")) // deliberate navigation within the results
+	m = send(m, searchResultMsg{gen: 2, query: "x", tracks: ts})
+	fr := m.stack[len(m.stack)-1]
+	if fr.cursor != len(fr.tracks) {
+		t.Errorf("deliberate album selection landed at %d, want %d (first album row)", fr.cursor, len(fr.tracks))
+	}
+}
+
+// TestHalfPageJump covers vim-style ctrl+d/ctrl+u: a large jump that clamps at
+// the list edges when the list is shorter than half a page.
+func TestHalfPageJump(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	m = send(m, runes("4")) // focus main (mock Liked Songs, shorter than half a page)
+	top := func() int { return m.stack[len(m.stack)-1].cursor }
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if n := len(m.stack[len(m.stack)-1].tracks); top() != n-1 {
+		t.Errorf("ctrl+d cursor = %d, want clamped bottom %d", top(), n-1)
+	}
+	m = send(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	if top() != 0 {
+		t.Errorf("ctrl+u cursor = %d, want 0", top())
 	}
 }
 
@@ -1021,7 +1082,7 @@ func TestLateSongsPreserveAlbumSelection(t *testing.T) {
 
 	m.searchGen = 4
 	m = send(m, albumSearchMsg{gen: 4, query: "q", albums: []model.Album{a1, a2}})
-	m.stack[len(m.stack)-1].cursor = 1 // user highlights a2 (no songs yet)
+	m = send(m, runes("j")) // user deliberately highlights a2 (no songs yet)
 
 	m = send(m, searchResultMsg{gen: 4, query: "q", tracks: ts, derivedAlbums: []model.Album{d}})
 

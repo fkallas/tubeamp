@@ -56,7 +56,8 @@ go build ./cmd/tubeamp
 ./tubeamp
 ```
 
-Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `j/k` move, `enter` plays,
+Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `j/k` move (`ctrl+d`/`ctrl+u`
+half-page), `enter` plays,
 `space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `↑/↓` or `+/-` volume, `/` search,
 `o` open album — an album row, or the album the highlighted **song** belongs to
 (works on song rows in search, your library, playlists, and the queue), `T` theme
