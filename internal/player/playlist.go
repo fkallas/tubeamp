@@ -89,9 +89,21 @@ func (p *Player) PlaylistReplace(ts []model.Track, start int) error {
 	if _, err := p.command("set_property", "playlist-pos", start); err != nil {
 		return err
 	}
+	p.ensurePlaying()
 	cp := append([]model.Track(nil), ts...)
 	p.setTracks(cp)
 	return p.persist(cp)
+}
+
+// ensurePlaying clears any paused state so an explicit track change starts
+// playing regardless of whether playback was previously paused. mpv keeps the
+// pause property across playlist-pos/loadfile changes, so without this, picking
+// a new song while paused would load it paused. mpv emits a pause
+// property-change in response, so the UI's play/pause indicator (which tracks
+// EvPause) updates to match. Best-effort: a failure does not abort the
+// already-issued track change.
+func (p *Player) ensurePlaying() {
+	_, _ = p.command("set_property", "pause", false)
 }
 
 // PlaylistAppend appends tracks to the end of the playlist. Persists the sidecar.
@@ -156,20 +168,31 @@ func (p *Player) PlaylistJump(i int) error {
 	if i < 0 {
 		return nil
 	}
-	_, err := p.command("set_property", "playlist-pos", i)
-	return err
+	if _, err := p.command("set_property", "playlist-pos", i); err != nil {
+		return err
+	}
+	p.ensurePlaying()
+	return nil
 }
 
-// Next advances to the next playlist entry (no-op at the end of the queue).
+// Next advances to the next playlist entry (no-op at the end of the queue). An
+// explicit skip always resumes playback even if it was paused.
 func (p *Player) Next() error {
-	_, err := p.command("playlist-next", "weak")
-	return err
+	if _, err := p.command("playlist-next", "weak"); err != nil {
+		return err
+	}
+	p.ensurePlaying()
+	return nil
 }
 
-// Prev returns to the previous playlist entry (no-op at the start).
+// Prev returns to the previous playlist entry (no-op at the start). An explicit
+// skip always resumes playback even if it was paused.
 func (p *Player) Prev() error {
-	_, err := p.command("playlist-prev", "weak")
-	return err
+	if _, err := p.command("playlist-prev", "weak"); err != nil {
+		return err
+	}
+	p.ensurePlaying()
+	return nil
 }
 
 // PlaylistClear empties the playlist and stops playback. Identical to Stop —

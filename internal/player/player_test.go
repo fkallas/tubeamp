@@ -664,6 +664,61 @@ func TestPlaylistReplaceAppendsThenJumps(t *testing.T) {
 	}
 }
 
+// sentPauseFalse reports whether a `set_property pause false` was issued —
+// the unpause an explicit track change sends so a new song plays even if
+// playback was paused.
+func sentPauseFalse(records [][]json.RawMessage) bool {
+	for _, rec := range records {
+		if len(rec) < 3 {
+			continue
+		}
+		var name, prop string
+		_ = json.Unmarshal(rec[0], &name)
+		_ = json.Unmarshal(rec[1], &prop)
+		if name != "set_property" || prop != "pause" {
+			continue
+		}
+		var paused bool
+		if json.Unmarshal(rec[2], &paused) == nil && !paused {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPlayOnSwap pins the play-on-swap behavior: PlaylistReplace, PlaylistJump,
+// Next, and Prev each force playback unpaused (set_property pause false), so
+// picking a new song while paused starts it playing. mpv then emits a pause
+// property-change and the UI indicator follows. (Flat loop, not subtests: the
+// fake mpv's unix socket lives under t.TempDir(), and long subtest names blow
+// past macOS's ~104-byte sun_path limit.)
+func TestPlayOnSwap(t *testing.T) {
+	ts := []model.Track{{VideoID: "a", Title: "A"}, {VideoID: "b", Title: "B"}}
+	cases := []struct {
+		name string
+		act  func(p *Player) error
+	}{
+		{"PlaylistReplace", func(p *Player) error { return p.PlaylistReplace(ts, 1) }},
+		{"PlaylistJump", func(p *Player) error { _ = p.PlaylistReplace(ts, 0); return p.PlaylistJump(1) }},
+		{"Next", func(p *Player) error { _ = p.PlaylistReplace(ts, 0); return p.Next() }},
+		{"Prev", func(p *Player) error { _ = p.PlaylistReplace(ts, 1); return p.Prev() }},
+	}
+	for _, tc := range cases {
+		f, conn := newFakeMPV(t)
+		go f.serveRecord()
+		p := newConn(conn)
+		p.queuePath = filepath.Join(t.TempDir(), "queue.json")
+		if err := tc.act(p); err != nil {
+			p.Close()
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !sentPauseFalse(f.cmdRecords()) {
+			t.Errorf("%s did not send set_property pause false (new song would stay paused)", tc.name)
+		}
+		p.Close()
+	}
+}
+
 // TestStopResetsMirrorAndSidecar checks Stop matches what mpv's stop does to
 // the playlist (clears it): the in-memory mirror and queue.json must reset too,
 // or later index-based mutations would target entries that no longer exist.
