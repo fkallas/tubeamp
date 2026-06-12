@@ -287,15 +287,26 @@ func (a *Auth) SAPISID() (string, error)  // parsed from cookie (SAPISID or __Se
 
 type Client struct{ ... }
 func NewClient(a *Auth) *Client // a may be nil => unauthenticated (search still works)
-func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error) // songs filter
+func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error)       // songs filter
+func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter
+func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error)
+                                                  // browse endpoint {browseId: ...}; sets Album.BrowseID = browseID
 
 // package ytm/parse — ALL response JSON parsing lives here, fixture-tested.
-func SearchTracks(raw []byte) ([]model.Track, error) // defensive: skip malformed items, never panic
+func SearchTracks(raw []byte) ([]model.Track, error)                  // songs search shelf
+func SearchAlbums(raw []byte) ([]model.Album, error)                  // albums search shelf + top-result card
+func AlbumPage(raw []byte) (model.Album, []model.Track, error)        // album header + track shelf
+// All defensive: skip malformed items, never panic. AlbumPage handles BOTH
+// header shapes (musicDetailHeaderRenderer and musicResponsiveHeaderRenderer);
+// per-track artists fall back to album artists, Track.Album = album title,
+// Track.ThumbURL = album thumb. The returned Album has no BrowseID (caller sets it).
 ```
 
 Response shapes change under us; parsers must tolerate missing keys. Mark the
-songs-filter `params` constant with a `// TODO: verify against ytmusicapi`
-comment.
+songs-/albums-filter `params` constants with a `// TODO: verify against ytmusicapi`
+comment. Parser fixtures in `parse/testdata/` (`search_albums.json`,
+`album_page.json`) are trimmed live captures; `album_page_detail.json` is
+handcrafted to exercise the older `musicDetailHeaderRenderer` shape.
 
 ## internal/ui (+ internal/ui/panels, internal/ui/overlay, internal/ui/keymap)
 

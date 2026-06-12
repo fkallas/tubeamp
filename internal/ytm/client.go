@@ -22,6 +22,12 @@ const (
 	// results to songs only (MUSIC_SEARCH_TYPE_SONG).
 	// TODO: verify against ytmusicapi
 	songsFilterParams = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
+
+	// albumsFilterParams is the InnerTube search params value that restricts
+	// results to albums only. Same envelope as songsFilterParams with the
+	// type segment changed from "II" (songs) to "IY" (albums).
+	// TODO: verify against ytmusicapi
+	albumsFilterParams = "EgWKAQIYAWoKEAkQBRAKEAMQBA%3D%3D"
 )
 
 // Client is an authenticated or unauthenticated InnerTube client for YouTube Music.
@@ -117,4 +123,59 @@ func (c *Client) Search(ctx context.Context, query string) ([]model.Track, error
 		return nil, fmt.Errorf("ytm.Search: %w", err)
 	}
 	return tracks, nil
+}
+
+// SearchAlbums queries YouTube Music for albums matching query and returns the
+// parsed album list. It uses the albums-only InnerTube filter params.
+func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) {
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"query":  query,
+		"params": albumsFilterParams,
+	}
+
+	raw, err := c.post(ctx, "search", payload)
+	if err != nil {
+		return nil, fmt.Errorf("ytm.SearchAlbums: %w", err)
+	}
+
+	albums, err := parse.SearchAlbums(raw)
+	if err != nil {
+		return nil, fmt.Errorf("ytm.SearchAlbums: %w", err)
+	}
+	return albums, nil
+}
+
+// GetAlbum browses an album page by its browseId (an MPRE… id) and returns the
+// album metadata together with its track list. The returned album's BrowseID is
+// always set to the requested browseID even if the page header omits it.
+func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error) {
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"browseId": browseID,
+	}
+
+	raw, err := c.post(ctx, "browse", payload)
+	if err != nil {
+		return model.Album{}, nil, fmt.Errorf("ytm.GetAlbum: %w", err)
+	}
+
+	album, tracks, err := parse.AlbumPage(raw)
+	if err != nil {
+		return model.Album{}, nil, fmt.Errorf("ytm.GetAlbum: %w", err)
+	}
+	album.BrowseID = browseID
+	return album, tracks, nil
 }

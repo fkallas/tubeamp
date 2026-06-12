@@ -1,0 +1,164 @@
+{
+  "header": {
+    "musicDetailHeaderRenderer": {
+      "title": {
+        "runs": [
+          {"text": "A Night at the Opera"}
+        ]
+      },
+      "subtitle": {
+        "runs": [
+          {"text": "Album"},
+          {"text": " • "},
+          {
+            "text": "Queen",
+            "navigationEndpoint": {
+              "browseEndpoint": {
+                "browseId": "UCiMhD4jzUqG-IgPzUmmZifg",
+                "browseEndpointContextSupportedConfigs": {
+                  "browseEndpointContextMusicConfig": {
+                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                  }
+                }
+              }
+            }
+          },
+          {"text": " • "},
+          {"text": "1975"}
+        ]
+      },
+      "thumbnail": {
+        "croppedSquareThumbnailRenderer": {
+          "thumbnail": {
+            "thumbnails": [
+              {"url": "https://lh3.googleusercontent.com/opera_small", "width": 60, "height": 60},
+              {"url": "https://lh3.googleusercontent.com/opera_large", "width": 544, "height": 544}
+            ]
+          }
+        }
+      },
+      "secondSubtitle": {
+        "runs": [
+          {"text": "12 songs"},
+          {"text": " • "},
+          {"text": "43 minutes"}
+        ]
+      }
+    }
+  },
+  "contents": {
+    "singleColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicShelfRenderer": {
+                      "contents": [
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Bohemian Rhapsody",
+                                        "navigationEndpoint": {
+                                          "watchEndpoint": {"videoId": "fJ9rUzIMcZQ"}
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Freddie Mercury",
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "UCfmFreddie",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": {
+                                                "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "fixedColumns": [
+                              {
+                                "musicResponsiveListItemFixedColumnRenderer": {
+                                  "text": {"runs": [{"text": "5:55"}]}
+                                }
+                              }
+                            ],
+                            "playlistItemData": {"videoId": "fJ9rUzIMcZQ"}
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "Love of My Life",
+                                        "navigationEndpoint": {
+                                          "watchEndpoint": {"videoId": "tMDM6z4axsI"}
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {}
+                                }
+                              }
+                            ],
+                            "fixedColumns": [
+                              {
+                                "musicResponsiveListItemFixedColumnRenderer": {
+                                  "text": {"runs": [{"text": "3:39"}]}
+                                }
+                              }
+                            ],
+                            "playlistItemData": {"videoId": "tMDM6z4axsI"}
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemRenderer": {
+                            "flexColumns": [
+                              {
+                                "musicResponsiveListItemFlexColumnRenderer": {
+                                  "text": {"runs": [{"text": "Malformed Track Without VideoId"}]}
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

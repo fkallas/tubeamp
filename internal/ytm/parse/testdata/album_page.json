@@ -1,0 +1,253 @@
+{
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [
+        {
+          "tabRenderer": {
+            "content": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "musicResponsiveHeaderRenderer": {
+                      "thumbnail": {
+                        "musicThumbnailRenderer": {
+                          "thumbnail": {
+                            "thumbnails": [
+                              {
+                                "url": "https://yt3.googleusercontent.com/wQciCa58U8mCR---1xlpZ8QR35i_j8BNXchKX9cNbE7IT19TWsouSLzfEQFFv8znufrremvYOtlE9FaT=w60-h60-l90-rj",
+                                "width": 60,
+                                "height": 60
+                              },
+                              {
+                                "url": "https://yt3.googleusercontent.com/wQciCa58U8mCR---1xlpZ8QR35i_j8BNXchKX9cNbE7IT19TWsouSLzfEQFFv8znufrremvYOtlE9FaT=w544-h544-l90-rj",
+                                "width": 544,
+                                "height": 544
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      "title": {
+                        "runs": [
+                          {
+                            "text": "OK COMPUTER. (SIDE B)"
+                          }
+                        ]
+                      },
+                      "subtitle": {
+                        "runs": [
+                          {
+                            "text": "Single"
+                          },
+                          {
+                            "text": " • "
+                          },
+                          {
+                            "text": "2021"
+                          }
+                        ]
+                      },
+                      "straplineTextOne": {
+                        "runs": [
+                          {
+                            "text": "MONTROPOLIS",
+                            "navigationEndpoint": {
+                              "browseEndpoint": {
+                                "browseId": "UCR7g04_J40AGoPqNQX_8Xpw",
+                                "browseEndpointContextSupportedConfigs": {
+                                  "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "straplineThumbnail": {
+                        "musicThumbnailRenderer": {
+                          "thumbnail": {
+                            "thumbnails": [
+                              {
+                                "url": "https://yt3.googleusercontent.com/fe-8i2n4xsNWNifTKCI7JeWjjOCCnsbi5RNuiY499Y_qxDsxIFz7NmDF2KX0u6GZY1o93lHyof9CtUbdww=w60-h60-l90-rj",
+                                "width": 60,
+                                "height": 60
+                              },
+                              {
+                                "url": "https://yt3.googleusercontent.com/fe-8i2n4xsNWNifTKCI7JeWjjOCCnsbi5RNuiY499Y_qxDsxIFz7NmDF2KX0u6GZY1o93lHyof9CtUbdww=w544-h544-l90-rj",
+                                "width": 544,
+                                "height": 544
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "secondaryContents": {
+        "sectionListRenderer": {
+          "contents": [
+            {
+              "musicShelfRenderer": {
+                "contents": [
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "flexColumns": [
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "WELCOME TO THE CYBERSPACE",
+                                  "navigationEndpoint": {
+                                    "watchEndpoint": {
+                                      "videoId": "1hst4Sk1QQU"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {}
+                          }
+                        }
+                      ],
+                      "fixedColumns": [
+                        {
+                          "musicResponsiveListItemFixedColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "2:58"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      ],
+                      "playlistItemData": {
+                        "videoId": "1hst4Sk1QQU"
+                      }
+                    }
+                  },
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "flexColumns": [
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "BOOM (Remix)",
+                                  "navigationEndpoint": {
+                                    "watchEndpoint": {
+                                      "videoId": "sFHQYgw1_3Y"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {}
+                          }
+                        }
+                      ],
+                      "fixedColumns": [
+                        {
+                          "musicResponsiveListItemFixedColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "6:53"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      ],
+                      "playlistItemData": {
+                        "videoId": "sFHQYgw1_3Y"
+                      }
+                    }
+                  },
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "flexColumns": [
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "DIE HÖLLE (Remix)",
+                                  "navigationEndpoint": {
+                                    "watchEndpoint": {
+                                      "videoId": "k0Kaqckv-Ro"
+                                    }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {}
+                          }
+                        }
+                      ],
+                      "fixedColumns": [
+                        {
+                          "musicResponsiveListItemFixedColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "4:20"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      ],
+                      "playlistItemData": {
+                        "videoId": "k0Kaqckv-Ro"
+                      }
+                    }
+                  },
+                  {
+                    "musicResponsiveListItemRenderer": {
+                      "flexColumns": [
+                        {
+                          "musicResponsiveListItemFlexColumnRenderer": {
+                            "text": {
+                              "runs": [
+                                {
+                                  "text": "Malformed Track Without VideoId"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
