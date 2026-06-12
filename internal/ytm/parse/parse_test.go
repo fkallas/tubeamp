@@ -66,6 +66,29 @@ func TestSearchTracks_fixture(t *testing.T) {
 	}
 }
 
+func TestSearchTracks_carryAlbumID(t *testing.T) {
+	data, err := os.ReadFile("testdata/search_songs.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	tracks, err := SearchTracks(data)
+	if err != nil {
+		t.Fatalf("SearchTracks: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("got %d tracks, want 2", len(tracks))
+	}
+	// Each song row threads its album's MPRE… browseId through to AlbumID so the
+	// UI can open the album from the song row.
+	if tracks[0].AlbumID != "MPREb_kkop4QEjWXe" {
+		t.Errorf("track[0].AlbumID = %q, want %q", tracks[0].AlbumID, "MPREb_kkop4QEjWXe")
+	}
+	if tracks[1].AlbumID != "MPREb_LoGXcQ" {
+		t.Errorf("track[1].AlbumID = %q, want %q", tracks[1].AlbumID, "MPREb_LoGXcQ")
+	}
+}
+
 func TestSearchResults_derivesAlbumsFromSongs(t *testing.T) {
 	data, err := os.ReadFile("testdata/search_songs.json")
 	if err != nil {

@@ -1143,3 +1143,115 @@ func TestAutoRefresh_skippedWithoutAuthFile(t *testing.T) {
 		t.Error("no reimport Cmd should fire without an auth file present")
 	}
 }
+
+// TestOpenAlbumFromSongRow: 'o' on a song row carrying an AlbumID fires a
+// GetAlbum and, when the result arrives, pushes the album view.
+func TestOpenAlbumFromSongRow(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// A plain track list (e.g. Liked Songs) whose song carries its album id.
+	m.setMain("Liked Songs", []model.Track{
+		{VideoID: "v1", Title: "Song One", Artists: []string{"Artist"}, Album: "Some Album", AlbumID: "MPREb_song1"},
+	})
+	m.setFocus(focusMain)
+
+	mm, cmd := m.Update(runes("o"))
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("'o' on a song row with an AlbumID dispatched no GetAlbum command")
+	}
+	if !strings.Contains(m.status, "loading") {
+		t.Errorf("status = %q, want a loading notice", m.status)
+	}
+
+	depth := len(m.stack)
+	a, ts := fakeAlbum()
+	m = send(m, albumLoadMsg{gen: m.albumGen, open: true, title: "Some Album", album: a, tracks: ts})
+	if len(m.stack) != depth+1 {
+		t.Fatalf("album view not pushed: depth %d -> %d", depth, len(m.stack))
+	}
+	if top := m.stack[len(m.stack)-1]; top.kind != mainAlbum {
+		t.Errorf("top frame kind = %v, want mainAlbum after song-row open", top.kind)
+	}
+}
+
+// TestOpenAlbumFromSongRowNoAlbumID: 'o' on a song with no AlbumID toasts and
+// pushes nothing.
+func TestOpenAlbumFromSongRowNoAlbumID(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m.setMain("Liked Songs", []model.Track{
+		{VideoID: "v1", Title: "Song One", Artists: []string{"Artist"}}, // no AlbumID
+	})
+	m.setFocus(focusMain)
+	depth := len(m.stack)
+
+	mm, cmd := m.Update(runes("o"))
+	m = mm.(Model)
+	if cmd != nil {
+		t.Error("'o' on a song with no AlbumID dispatched a command (would browse nothing)")
+	}
+	if !strings.Contains(m.status, "no album for this track") {
+		t.Errorf("status = %q, want the no-album toast", m.status)
+	}
+	if len(m.stack) != depth {
+		t.Errorf("stack depth changed to %d, want %d (no push)", len(m.stack), depth)
+	}
+}
+
+// TestOpenAlbumFromQueueRow: 'o' on a queue row opens the song's album too.
+func TestOpenAlbumFromQueueRow(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	m.q.Set([]model.Track{
+		{VideoID: "v1", Title: "Q1", Artists: []string{"A"}, Album: "Q Album", AlbumID: "MPREb_q1"},
+	}, 0)
+	m = send(m, runes("3")) // focus Queue
+	m.queueCursor = 0
+
+	mm, cmd := m.Update(runes("o"))
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("'o' on a queue row with an AlbumID dispatched no GetAlbum command")
+	}
+
+	depth := len(m.stack)
+	a, ts := fakeAlbum()
+	m = send(m, albumLoadMsg{gen: m.albumGen, open: true, album: a, tracks: ts})
+	if len(m.stack) != depth+1 || m.stack[len(m.stack)-1].kind != mainAlbum {
+		t.Errorf("queue 'o' did not push album view: depth %d -> %d", depth, len(m.stack))
+	}
+}
+
+// TestOpenAlbumFromAlbumRowStillWorks: 'o' on a search-results album row keeps
+// opening that album by its own browseId (unchanged behavior).
+func TestOpenAlbumFromAlbumRowStillWorks(t *testing.T) {
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue())
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	row := model.Album{BrowseID: "MPREb_row", Title: "Row Album", Artists: []string{"A"}}
+	song := model.Track{VideoID: "v1", Title: "S1", Artists: []string{"A"}, Album: "Other", AlbumID: "MPREb_other"}
+	m.searchGen = 4
+	m = send(m, searchResultMsg{gen: 4, query: "q", tracks: []model.Track{song}, derivedAlbums: []model.Album{row}})
+
+	// Move the cursor onto the album row (one song, album at index len(tracks)).
+	m.stack[len(m.stack)-1].cursor = 1
+	m.setFocus(focusMain)
+
+	mm, cmd := m.Update(runes("o"))
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("'o' on an album row dispatched no GetAlbum command")
+	}
+
+	depth := len(m.stack)
+	full, ts := fakeAlbum()
+	full.BrowseID = "MPREb_row"
+	m = send(m, albumLoadMsg{gen: m.albumGen, open: true, title: "Row Album", album: full, tracks: ts})
+	if len(m.stack) != depth+1 || m.stack[len(m.stack)-1].kind != mainAlbum {
+		t.Errorf("album-row 'o' did not push album view: depth %d -> %d", depth, len(m.stack))
+	}
+}

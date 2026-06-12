@@ -215,7 +215,8 @@ func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album,
 
 // GetAlbum browses an album page by its browseId (an MPRE… id) and returns the
 // album metadata together with its track list. The returned album's BrowseID is
-// always set to the requested browseID even if the page header omits it.
+// always set to the requested browseID even if the page header omits it, and so
+// is every track's AlbumID — the rows on an album page all belong to that album.
 func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error) {
 	payload := map[string]any{
 		"context": map[string]any{
@@ -238,6 +239,9 @@ func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []
 		return model.Album{}, nil, fmt.Errorf("ytm.GetAlbum: %w", err)
 	}
 	album.BrowseID = browseID
+	for i := range tracks {
+		tracks[i].AlbumID = browseID
+	}
 	return album, tracks, nil
 }
 

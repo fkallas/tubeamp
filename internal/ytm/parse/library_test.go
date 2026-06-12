@@ -179,10 +179,17 @@ func TestPlaylistTracks_fixture(t *testing.T) {
 	if t0.ThumbURL != "https://lh3.googleusercontent.com/large" {
 		t.Errorf("track[0].ThumbURL = %q, want largest thumbnail", t0.ThumbURL)
 	}
+	// Playlist rows also thread their album browseId through to AlbumID.
+	if t0.AlbumID != "MPREb_LoGXcQ" {
+		t.Errorf("track[0].AlbumID = %q, want %q", t0.AlbumID, "MPREb_LoGXcQ")
+	}
 
 	t1 := tracks[1]
 	if t1.VideoID != "hTWKbfoikeg" || t1.Title != "Smells Like Teen Spirit" {
 		t.Errorf("track[1] = {%q, %q}, want {hTWKbfoikeg, Smells Like Teen Spirit}", t1.VideoID, t1.Title)
+	}
+	if t1.AlbumID != "MPREb_nevermind" {
+		t.Errorf("track[1].AlbumID = %q, want %q", t1.AlbumID, "MPREb_nevermind")
 	}
 }
 

@@ -6,12 +6,16 @@ import (
 	"time"
 )
 
-// Track is a playable YT Music song.
+// Track is a playable YT Music song. AlbumID, when non-empty, is the MPRE…
+// browseId of the album the song belongs to, threaded through from the parser so
+// the UI can open the album from a song row; it is "" when the source row carried
+// no resolvable album reference (the UI then treats the song as album-less).
 type Track struct {
 	VideoID  string
 	Title    string
 	Artists  []string
 	Album    string
+	AlbumID  string
 	Duration time.Duration
 	ThumbURL string
 }

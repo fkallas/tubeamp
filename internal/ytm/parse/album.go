@@ -174,7 +174,10 @@ func parseAlbumTracks(root map[string]any, album model.Album) []model.Track {
 }
 
 // parseAlbumTrack extracts a track from an album shelf item. Per-track artists
-// fall back to the album artists when the item has none.
+// fall back to the album artists when the item has none. AlbumID is the album's
+// own browseId (album.BrowseID): the rows on an album page belong to that album.
+// Within AlbumPage the header carries no browseId, so this resolves to "" and
+// GetAlbum fills it once it knows the requested id.
 func parseAlbumTrack(r map[string]any, album model.Album) (model.Track, bool) {
 	videoID := extractVideoID(r)
 	if videoID == "" {
@@ -190,6 +193,7 @@ func parseAlbumTrack(r map[string]any, album model.Album) (model.Track, bool) {
 		Title:    extractTitle(flexCols),
 		Artists:  artists,
 		Album:    album.Title,
+		AlbumID:  album.BrowseID,
 		Duration: extractDuration(r, flexCols),
 		ThumbURL: album.ThumbURL,
 	}, true

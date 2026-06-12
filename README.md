@@ -58,12 +58,14 @@ go build ./cmd/tubeamp
 
 Keys: `1/2/3/4` jump to a panel, `h/l` cycle panels, `j/k` move, `enter` plays,
 `space` pause, `n`/`p` next/previous, `←/→` seek ±5s, `↑/↓` or `+/-` volume, `/` search,
-`o` open the selected album (album rows in search results), `T` theme picker,
-`?` help, `q` quit (playback keeps running in the background).
+`o` open album — an album row, or the album the highlighted **song** belongs to
+(works on song rows in search, your library, playlists, and the queue), `T` theme
+picker, `?` help, `q` quit (playback keeps running in the background).
 
 Search returns two sections — Songs and Albums. On an album row, `enter` plays the
 whole album and `o` opens an album view (cover, metadata, track list) where `enter`
-plays the album from the highlighted track and `esc` returns to the results.
+plays the album from the highlighted track and `esc` returns to the results. `o` on
+a song row opens that song's album view too.
 
 ## Gapless playback
 

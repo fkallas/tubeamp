@@ -35,7 +35,7 @@ it in your report — do not silently deviate.
   exported identifiers. No `panic` in library code.
 - Unix only for now (darwin/linux).
 
-## internal/model (already written — do not modify)
+## internal/model
 
 ```go
 type Track struct {
@@ -43,6 +43,7 @@ type Track struct {
     Title    string
     Artists  []string
     Album    string
+    AlbumID  string // album's MPRE… browseId; "" when unknown. Lets the UI open the album from a song row.
     Duration time.Duration
     ThumbURL string
 }
@@ -346,6 +347,7 @@ func (c *Client) SearchWithAlbums(ctx context.Context, query string) (tracks []m
 func (c *Client) SearchAlbums(ctx context.Context, query string) ([]model.Album, error) // albums filter (dedicated vertical)
 func (c *Client) GetAlbum(ctx context.Context, browseID string) (model.Album, []model.Track, error)
                                                   // browse endpoint {browseId: ...}; sets Album.BrowseID = browseID
+                                                  // and every returned Track.AlbumID = browseID (album rows belong to it)
 
 // Library / playlists (browse, same WEB_REMIX context). REQUIRE a live signed-in
 // session: an anonymous (or stale-cookie) session makes YouTube return the
@@ -400,7 +402,11 @@ func PlaylistTracks(raw []byte) ([]model.Track, error)     // playlist/Liked-Son
 // All defensive: skip malformed items, never panic. AlbumPage handles BOTH
 // header shapes (musicDetailHeaderRenderer and musicResponsiveHeaderRenderer);
 // per-track artists fall back to album artists, Track.Album = album title,
-// Track.ThumbURL = album thumb. The returned Album has no BrowseID (caller sets it).
+// Track.ThumbURL = album thumb. The returned Album has no BrowseID (caller sets it),
+// so AlbumPage's tracks carry AlbumID = "" — ytm.GetAlbum stamps the real browseId
+// onto each. Every song-row parser (SearchResults/SearchTracks, PlaylistTracks,
+// LikedSongs) threads the row's album MPRE… browseId through to Track.AlbumID
+// ("" when the row links to no album).
 ```
 
 Response shapes change under us; parsers must tolerate missing keys. Mark the
@@ -567,13 +573,21 @@ Per panel: `j`/`k` move selection; `g/G` top/bottom; `enter` activates.
 Library/Playlists `enter` → load tracks into the main view (see "Library &
 playlists" below for the real-vs-mock split). Main view
 `enter` → `queue.Set(visibleTracks, cursor)` + play; `a` append to queue;
-`A` insert-next; `o` open album (album rows only). Queue: `enter` jump-to-track,
-`d` remove, `J/K` move item, `c` clear.
+`A` insert-next; `o` open album — on a search **album row** the album by its own
+browseId, on a **song row** (plain track list, the search Songs section) the
+song's album via `Track.AlbumID` (toast "no album for this track" when empty).
+Queue: `enter` jump-to-track, `d` remove, `J/K` move item, `c` clear, `o` open the
+selected track's album.
 
 Album flows (main view): a search produces two sections — Songs then Albums (see
 below). On an **album row**: `enter` fetches `GetAlbum` then `PlaylistReplace`s the
 queue with the album from track 0 and plays ("Playing <album>" toast); `o` fetches
-`GetAlbum` then pushes a dedicated **album view** onto the main-view stack. In the
+`GetAlbum` then pushes a dedicated **album view** onto the main-view stack. On a
+**song row** (any track list, the search Songs section, or a Queue panel row),
+`o` opens that song's album the same way — `GetAlbum(Track.AlbumID)` through the
+same generation guard and album-view push as the album-row `o`; a song with no
+`AlbumID` toasts "no album for this track" and pushes nothing. The album view
+itself does not bind `o` (its rows already belong to the album on screen). In the
 **album view**: `j`/`k` move; `enter` = `PlaylistReplace(albumTracks, selected)` +
 play (the whole album, starting at the selected track); `esc` pops back to the
 search results with the cursor preserved. GetAlbum carries a generation guard

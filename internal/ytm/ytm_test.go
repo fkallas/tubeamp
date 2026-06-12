@@ -1,6 +1,9 @@
 package ytm
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +66,45 @@ func TestSAPISID_missing(t *testing.T) {
 	_, err := a.SAPISID()
 	if err == nil {
 		t.Fatal("expected error for missing SAPISID, got nil")
+	}
+}
+
+// ---- GetAlbum tests ----
+
+// TestGetAlbum_setsTrackAlbumID serves the album-page fixture from a fake server
+// and asserts GetAlbum stamps the requested browseId onto the album and onto
+// every track's AlbumID (album rows belong to the album). Never hits the network.
+func TestGetAlbum_setsTrackAlbumID(t *testing.T) {
+	raw, err := os.ReadFile("parse/testdata/album_page.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+	}))
+	defer srv.Close()
+
+	c := NewClient(nil)
+	c.baseURL = srv.URL
+
+	const browseID = "MPREb_okComputerSideB"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	album, tracks, err := c.GetAlbum(ctx, browseID)
+	if err != nil {
+		t.Fatalf("GetAlbum: %v", err)
+	}
+	if album.BrowseID != browseID {
+		t.Errorf("album.BrowseID = %q, want %q", album.BrowseID, browseID)
+	}
+	if len(tracks) == 0 {
+		t.Fatal("expected album tracks, got none")
+	}
+	for i, tr := range tracks {
+		if tr.AlbumID != browseID {
+			t.Errorf("tracks[%d].AlbumID = %q, want %q", i, tr.AlbumID, browseID)
+		}
 	}
 }
 

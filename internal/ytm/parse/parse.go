@@ -81,19 +81,15 @@ func SearchResults(raw []byte) (SearchResult, error) {
 		}
 		res.Tracks = append(res.Tracks, t)
 
-		// Derive an album ref from this song row's album flex column.
-		flexCols := getSlice(getPath(renderer, "flexColumns"))
-		browseID, title := extractAlbumRef(flexCols)
-		if browseID == "" || seen[browseID] {
+		// Derive an album ref from this song row's album browseId (t.AlbumID,
+		// set by parseItem from the row's album flex column).
+		if t.AlbumID == "" || seen[t.AlbumID] {
 			continue
 		}
-		seen[browseID] = true
-		if title == "" {
-			title = t.Album
-		}
+		seen[t.AlbumID] = true
 		res.Albums = append(res.Albums, model.Album{
-			BrowseID: browseID,
-			Title:    title,
+			BrowseID: t.AlbumID,
+			Title:    t.Album,
 			Artists:  t.Artists,
 			ThumbURL: t.ThumbURL,
 			// Year intentionally left empty: GetAlbum fills it on open/play.
@@ -116,6 +112,9 @@ func SearchTracks(raw []byte) ([]model.Track, error) {
 
 // parseItem extracts a model.Track from a musicResponsiveListItemRenderer map.
 // Returns (track, true) on success, (zero, false) when the item lacks a videoId.
+// AlbumID is the song row's album browse reference (the MPRE… browseId carried by
+// its album flex-column run) when present, "" otherwise; it is threaded through
+// for every song-row parser (search results, playlists, liked songs).
 func parseItem(r map[string]any) (model.Track, bool) {
 	videoID := extractVideoID(r)
 	if videoID == "" {
@@ -126,6 +125,7 @@ func parseItem(r map[string]any) (model.Track, bool) {
 
 	title := extractTitle(flexCols)
 	artists, album := extractArtistsAlbum(flexCols)
+	albumID, _ := extractAlbumRef(flexCols)
 	duration := extractDuration(r, flexCols)
 	thumb := extractThumbnail(r)
 
@@ -134,6 +134,7 @@ func parseItem(r map[string]any) (model.Track, bool) {
 		Title:    title,
 		Artists:  artists,
 		Album:    album,
+		AlbumID:  albumID,
 		Duration: duration,
 		ThumbURL: thumb,
 	}, true

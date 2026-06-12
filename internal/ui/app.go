@@ -1280,21 +1280,53 @@ func (m *Model) playTracks(ts []model.Track, start int) tea.Cmd {
 	return tea.Batch(m.reflectCurrent(true), replaceCmd(m.p, ts, start))
 }
 
-// handleOpen implements the `o` action: open the album under the cursor (only
-// meaningful on an album row of a search-results frame).
+// handleOpen implements the `o` action: open an album view. On a search-results
+// album row it opens that album by its own browseId (unchanged). On a SONG row —
+// a plain track list (Liked Songs, a playlist), the search Songs section, or the
+// Queue panel — it opens the album the song belongs to (its AlbumID); a song with
+// no known album toasts instead. Both paths share the album-fetch generation
+// guard and the album-view push. The album detail view is excluded: its rows
+// already belong to the album on screen.
 func (m *Model) handleOpen() tea.Cmd {
-	if m.focus != focusMain {
+	switch m.focus {
+	case focusMain:
+		top := m.stack[len(m.stack)-1]
+		if top.kind == mainSearch && top.cursor >= len(top.tracks) {
+			// An album row of a search frame: open by the album's own browseId.
+			ai := top.cursor - len(top.tracks)
+			if ai < 0 || ai >= len(top.albums) {
+				return nil
+			}
+			return m.openAlbum(top.albums[ai], true)
+		}
+		if top.kind == mainAlbum {
+			return nil
+		}
+		if t, ok := m.mainCurrent(); ok {
+			return m.openTrackAlbum(t)
+		}
+	case focusQueue:
+		items := m.q.Items()
+		if m.queueCursor >= 0 && m.queueCursor < len(items) {
+			return m.openTrackAlbum(items[m.queueCursor])
+		}
+	}
+	return nil
+}
+
+// openTrackAlbum opens the album a song belongs to (its AlbumID, an MPRE…
+// browseId), pushing the album view via the same GetAlbum path as the album-row
+// 'o'. A song carrying no album reference toasts "no album for this track".
+func (m *Model) openTrackAlbum(t model.Track) tea.Cmd {
+	if t.AlbumID == "" {
+		m.setStatus("no album for this track")
 		return nil
 	}
-	top := m.stack[len(m.stack)-1]
-	if top.kind != mainSearch || top.cursor < len(top.tracks) {
-		return nil
+	title := t.Album
+	if title == "" {
+		title = "album"
 	}
-	ai := top.cursor - len(top.tracks)
-	if ai < 0 || ai >= len(top.albums) {
-		return nil
-	}
-	return m.openAlbum(top.albums[ai], true)
+	return m.openAlbum(model.Album{BrowseID: t.AlbumID, Title: title}, true)
 }
 
 // openAlbum fetches an album page via GetAlbum. open=true opens the album view;
@@ -1861,8 +1893,8 @@ func (m Model) contextHints() []hint {
 		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "open"}, {"1-4/hl", "focus"},
 			{k.Search.Help().Key, "search"}, {k.Theme.Help().Key, "theme"}, {k.Help.Help().Key, "help"}}
 	case focusQueue:
-		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Remove.Help().Key, "remove"},
-			{"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}, {k.Help.Help().Key, "help"}}
+		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Open.Help().Key, "open album"},
+			{k.Remove.Help().Key, "remove"}, {"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}}
 	default: // focusMain
 		top := m.stack[len(m.stack)-1]
 		switch {
@@ -1874,8 +1906,8 @@ func (m Model) contextHints() []hint {
 			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play album"},
 				{k.Open.Help().Key, "open album"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 		default:
-			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
-				{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
+			return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Open.Help().Key, "open album"},
+				{k.Append.Help().Key, "queue"}, {k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}}
 		}
 	}
 }
