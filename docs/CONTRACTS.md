@@ -442,6 +442,14 @@ func (c *Client) Lyrics(ctx context.Context, videoID string) (string, error)
                                                   // InnerTube flow: POST next {videoId} -> lyrics-tab browseId
                                                   // (parse.LyricsBrowseID) -> POST browse {browseId} ->
                                                   // description text (parse.LyricsText). ErrNoLyrics when absent.
+func (c *Client) TrackDetails(ctx context.Context, videoID string) (album, albumID string, dur time.Duration, err error)
+                                                  // album (name + MPRE… browseId) + duration enrichment for
+                                                  // Data-API tracks (which carry neither). POST next {videoId},
+                                                  // parse.TrackDetails reads the now-playing queue item (matched
+                                                  // by videoID). Any field may be zero (no album / no length) —
+                                                  // a valid result, not an error; only transport/HTTP failure or
+                                                  // a queue-less response errors. MUST run anonymous (InnerTube
+                                                  // rejects OAuth). Backs internal/enrich.
 
 var ErrNoLyrics = parse.ErrNoLyrics // aliased so errors.Is works on ytm.Lyrics results
 
@@ -470,6 +478,16 @@ func AccountInfo(raw []byte) (name string, signedIn bool, error)      // account
 func LyricsBrowseID(raw []byte) (string, error)
 func LyricsText(raw []byte) (string, error)
 var ErrNoLyrics = errors.New("ytm: no lyrics") // no lyrics tab / no description shelf
+
+// TrackDetails reads a song's album (name + MPRE… browseId) and duration from a
+// `next` watch response's playlistPanelVideoRenderer queue items (the one matching
+// videoID, else the first/now-playing). Album: the longByline album run, falling
+// back to the menu "Go to album" navigation id (name then ""). Duration: lengthText
+// ("3:47") or a numeric lengthSeconds. Zero fields are valid (single with no album,
+// item with no length); only malformed JSON / a queue-less response errors.
+// Defensive, fixture-tested (trackdetails_next.json — handcrafted; field paths
+// marked "// TODO: verify against ytmusicapi").
+func TrackDetails(raw []byte, videoID string) (album, albumID string, dur time.Duration, err error)
 
 var ErrNotSignedIn = errors.New("ytm: not signed in") // logged-out page. Detected positively via the
                                                   // responseContext "logged_in" marker ("0" => logged out;
@@ -512,6 +530,9 @@ credential-free anonymous live tests (gated on `TUBEAMP_LIVE=1`).
 playlist-shelf), each with one malformed item skipped. `lyrics_next.json` /
 `lyrics_browse.json` are a handcrafted next+browse pair exercising the two-call
 lyrics flow (a "Lyrics" tab with an MPLYt browseId, then a description shelf).
+`trackdetails_next.json` is a handcrafted `next` (watch) response exercising
+`TrackDetails`: a two-item queue where item 1 carries the album on its byline and
+item 2 only in its "Go to album" menu (the byline-vs-menu album paths).
 
 ## internal/ytdata
 
@@ -599,6 +620,46 @@ stay "" (the Data API does not expose album) and `Duration` is 0 (NOTE: a
 largest of snippet.thumbnails (by area, falling back to a high/medium preference
 order). The OAuth token refresh reuses `ytm.OAuthToken.Refresh`; the client wraps
 it behind an injectable seam so tests drive it against an httptest token endpoint.
+The album/duration the Data API omits are filled separately by `internal/enrich`
+(via `ytm.Client.TrackDetails`), so `mapVideo` deliberately leaves them zero.
+
+## internal/enrich
+
+Fills the album + duration the OAuth Data API omits, from anonymous InnerTube,
+with a **permanent** on-disk cache (a song's album never changes). Designed for
+progressive background enrichment from the UI: `Fill` reports the still-missing
+videoIDs, which the UI feeds to `EnrichMissing` in Cmd-sized chunks.
+
+```go
+// package enrich
+// TrackDetailer is the InnerTube seam (satisfied by *ytm.Client). nil => cache-only.
+type TrackDetailer interface {
+    TrackDetails(ctx context.Context, videoID string) (album, albumID string, dur time.Duration, err error)
+}
+type Detail struct { VideoID, Album, AlbumID string; Duration time.Duration } // the cached unit
+
+type Enricher struct{ ... } // safe for concurrent use
+func NewEnricher(cache *store.Cache, d TrackDetailer) *Enricher
+                                       // cache points at config.CacheDir()/enrich
+                                       // (permanent, maxAge 0); d nil => cache-only.
+func (e *Enricher) Fill(tracks []model.Track) (filled []model.Track, missing []string)
+                                       // copy of tracks with Album/AlbumID/Duration
+                                       // filled from cache (only missing fields; never
+                                       // clobbers source data); missing = deduped
+                                       // videoIDs still lacking an album id/duration
+                                       // with no cache entry. Pure-ish: no network.
+func (e *Enricher) EnrichMissing(ctx context.Context, ids []string) ([]Detail, error)
+                                       // fetch each id via TrackDetails, write every
+                                       // success to the permanent cache, return the
+                                       // details. Bounded concurrency (4) + a small
+                                       // politeness delay. A single failure is skipped
+                                       // (partial), not fatal; nil seam / no ids =>
+                                       // no-op; cancelled ctx => partials + ctx.Err().
+```
+
+Cache keyed by videoID, JSON-encoded `Detail`, no expiry. Tests use a fake
+`TrackDetailer` + `t.TempDir` cache (cache-hit fills with zero network calls;
+EnrichMissing fills + caches; concurrency asserted bounded).
 
 ## internal/lyrics
 

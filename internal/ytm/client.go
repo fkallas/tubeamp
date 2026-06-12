@@ -313,6 +313,37 @@ func (c *Client) Lyrics(ctx context.Context, videoID string) (string, error) {
 	return text, nil
 }
 
+// TrackDetails fetches the album (name + MPRE… browseId) and the duration of a
+// song from the anonymous InnerTube `next` (watch) endpoint. The OAuth-backed
+// YouTube Data API exposes neither field, so this enriches Data-API library
+// tracks: POST next {videoId}, then parse.TrackDetails reads the now-playing queue
+// item (matched by videoID). Any field may legitimately come back zero (a single
+// with no album, an item with no length); only a transport/HTTP failure or a
+// response with no queue item returns an error. It must run on a cookie/anonymous
+// client — InnerTube rejects OAuth bearer tokens.
+func (c *Client) TrackDetails(ctx context.Context, videoID string) (album, albumID string, dur time.Duration, err error) {
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20240101.01.00",
+				"hl":            "en",
+			},
+		},
+		"videoId": videoID,
+	}
+
+	raw, err := c.post(ctx, "next", payload)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("ytm.TrackDetails: %w", err)
+	}
+	album, albumID, dur, err = parse.TrackDetails(raw, videoID)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("ytm.TrackDetails: %w", err)
+	}
+	return album, albumID, dur, nil
+}
+
 // AccountInfo queries the InnerTube account menu (the account/account_menu
 // endpoint) and reports the signed-in account. signedIn is true when YouTube
 // returns the signed-in menu — an activeAccountHeaderRenderer — and name is its

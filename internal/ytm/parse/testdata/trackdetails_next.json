@@ -1,0 +1,135 @@
+{
+  "contents": {
+    "singleColumnMusicWatchNextResultsRenderer": {
+      "tabbedRenderer": {
+        "watchNextTabbedResultsRenderer": {
+          "tabs": [
+            {
+              "tabRenderer": {
+                "title": "Up next",
+                "selected": true,
+                "content": {
+                  "musicQueueRenderer": {
+                    "content": {
+                      "playlistPanelRenderer": {
+                        "contents": [
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "title": { "runs": [ { "text": "Bohemian Rhapsody" } ] },
+                              "videoId": "fJ9rUzIMcZQ",
+                              "lengthText": { "runs": [ { "text": "5:55" } ] },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Queen",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UCiMhD4jzUqG-IgPzUmmytRQ",
+                                        "browseEndpointContextSupportedConfigs": {
+                                          "browseEndpointContextMusicConfig": {
+                                            "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  },
+                                  { "text": " • " },
+                                  {
+                                    "text": "A Night at the Opera",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "MPREb_nightAtTheOpera",
+                                        "browseEndpointContextSupportedConfigs": {
+                                          "browseEndpointContextMusicConfig": {
+                                            "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  },
+                                  { "text": " • " },
+                                  { "text": "1975" }
+                                ]
+                              },
+                              "menu": {
+                                "menuRenderer": {
+                                  "items": [
+                                    {
+                                      "menuNavigationItemRenderer": {
+                                        "text": { "runs": [ { "text": "Go to album" } ] },
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "MPREb_nightAtTheOpera",
+                                            "browseEndpointContextSupportedConfigs": {
+                                              "browseEndpointContextMusicConfig": {
+                                                "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          },
+                          {
+                            "playlistPanelVideoRenderer": {
+                              "title": { "runs": [ { "text": "You're My Best Friend" } ] },
+                              "videoId": "HaZpZQG2z10",
+                              "lengthText": { "runs": [ { "text": "2:52" } ] },
+                              "longBylineText": {
+                                "runs": [
+                                  {
+                                    "text": "Queen",
+                                    "navigationEndpoint": {
+                                      "browseEndpoint": {
+                                        "browseId": "UCiMhD4jzUqG-IgPzUmmytRQ",
+                                        "browseEndpointContextSupportedConfigs": {
+                                          "browseEndpointContextMusicConfig": {
+                                            "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                ]
+                              },
+                              "menu": {
+                                "menuRenderer": {
+                                  "items": [
+                                    {
+                                      "menuNavigationItemRenderer": {
+                                        "text": { "runs": [ { "text": "Go to album" } ] },
+                                        "navigationEndpoint": {
+                                          "browseEndpoint": {
+                                            "browseId": "MPREb_aDayAtTheRaces"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "tabRenderer": {
+                "title": "Lyrics",
+                "endpoint": { "browseEndpoint": { "browseId": "MPLYt_xyz" } }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
