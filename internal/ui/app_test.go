@@ -398,62 +398,39 @@ func TestLogoWordmarkAndIndicator(t *testing.T) {
 	}
 }
 
-// TestLogoTickAdvancesPhase asserts a logoTickMsg advances the colour-cycle phase
-// and re-arms the tick, and that the rendered view still holds (no panic, the
-// wordmark is intact and the dimensions are unchanged) afterwards.
-func TestLogoTickAdvancesPhase(t *testing.T) {
+// TestWordmarkStaticRender asserts the static (non-animated) "tubeamp" wordmark
+// renders in the header at a normal size and is hidden when the terminal is too
+// short, while the full-width/full-height frame invariants hold in both cases.
+// Init must not arm any periodic tick (the colour-cycle animation is gone).
+func TestWordmarkStaticRender(t *testing.T) {
 	const w, h = 120, 40
 	m := newTestModel(t, w, h)
-	before := m.logoPhase
-
-	updated, cmd := m.Update(logoTickMsg{})
-	m = updated.(Model)
-	if m.logoPhase != before+1 {
-		t.Errorf("logoPhase = %d, want %d (advanced by one tick)", m.logoPhase, before+1)
-	}
-	if cmd == nil {
-		t.Error("logoTickMsg did not re-arm the animation tick")
-	}
 
 	v := m.View()
 	if !strings.Contains(ansi.Strip(v), "tubeamp") {
-		t.Errorf("wordmark missing after a tick:\n%s", ansi.Strip(v))
+		t.Errorf("wordmark missing from header:\n%s", ansi.Strip(v))
 	}
 	lines := strings.Split(v, "\n")
 	if len(lines) != h {
-		t.Fatalf("after tick: view has %d rows, want %d", len(lines), h)
+		t.Fatalf("view has %d rows, want %d", len(lines), h)
 	}
 	for i, ln := range lines {
 		if got := lipgloss.Width(ln); got != w {
-			t.Errorf("after tick: line %d width = %d, want %d", i, got, w)
+			t.Errorf("line %d width = %d, want %d", i, got, w)
 		}
 	}
-}
 
-// TestLogoTickPausesWhileHeaderHidden: while the terminal is too short for the
-// header the wordmark is never rendered, so the tick must stop re-arming (no
-// 4 Hz wake-ups for an invisible animation); a resize that brings the header
-// back re-arms exactly one tick.
-func TestLogoTickPausesWhileHeaderHidden(t *testing.T) {
-	m := newTestModel(t, 120, logoMinTermHeight-1) // header hidden
-
-	updated, cmd := m.Update(logoTickMsg{})
-	m = updated.(Model)
-	if cmd != nil {
-		t.Error("tick re-armed while the header is hidden")
+	// Header hidden at the shortest height; frame still exact.
+	short := newTestModel(t, w, logoMinTermHeight-1)
+	sv := short.View()
+	slines := strings.Split(sv, "\n")
+	if got := strings.Count(strings.SplitN(ansi.Strip(sv), "\n", 2)[0], "tubeamp"); got != 0 {
+		t.Errorf("wordmark should be hidden below logoMinTermHeight, found it on the top row")
 	}
-
-	// Growing the terminal back over the threshold re-arms the animation.
-	updated2, cmd2 := m.Update(tea.WindowSizeMsg{Width: 120, Height: logoMinTermHeight})
-	m = updated2.(Model)
-	if cmd2 == nil {
-		t.Fatal("resize that shows the header did not re-arm the tick")
-	}
-
-	// A further resize while a tick is already pending must not arm a second.
-	_, cmd3 := m.Update(tea.WindowSizeMsg{Width: 120, Height: logoMinTermHeight + 5})
-	if cmd3 != nil {
-		t.Error("resize armed a second tick while one was already pending")
+	for i, ln := range slines {
+		if got := lipgloss.Width(ln); got != w {
+			t.Errorf("short: line %d width = %d, want %d", i, got, w)
+		}
 	}
 }
 

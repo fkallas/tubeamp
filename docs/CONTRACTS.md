@@ -737,20 +737,14 @@ tubeamp                              v0.1.0   ● account   ← wordmark header 
 ```
 
 Wordmark header: 1 row (`logoHeight`), a plain "tubeamp" wordmark (7 letters) in
-the top-left whose letters cycle through the theme's colours as an animation —
-letter `i` takes `theme.Palette()[(i+phase) % len(palette)]` (image/color values
-converted to lipgloss colours), so advancing `phase` flows the colours across the
-word. A `tea.Tick` (~250ms, started in `Init` and re-issued on each
-`logoTickMsg`) increments the phase (a model field) and the view re-renders; the
-tick is cheap and independent of every other Cmd. While the header is hidden the
-tick is NOT re-armed — the animation pauses instead of waking the UI 4×/s for an
-invisible wordmark — and a resize that brings the header back re-arms it,
-guarded by a model flag (`logoTicking`) so at most one tick is ever pending. The
-Muted "v0.1.0" version tag
-and the sign-in indicator ride the same row, right-aligned. When terminal height
-< `logoMinTermHeight` (= `minHeight + logoHeight`) the header is hidden and the
-panel area reclaims that row (the panel-area floor needs that row at the shortest
-size). Colours come strictly from theme tokens/palette — no hardcoded hex.
+the top-left rendered in a single static colour — the theme's **accent**
+(`AccentStyle`), the same hue that highlights the active panel's border. No
+animation (`renderWordmark(th)` has no phase; there is no tick). The Muted
+"v0.1.0" version tag and the sign-in indicator ride the same row, right-aligned.
+When terminal height < `logoMinTermHeight` (= `minHeight + logoHeight`) the header
+is hidden and the panel area reclaims that row (the panel-area floor needs that
+row at the shortest size). Colour comes strictly from a theme token — no
+hardcoded hex.
 
 Sign-in indicator: when the **library source** (`m.lib`) is non-nil the model
 fires a one-shot `lib.AccountInfo` Cmd on startup (`Init`); `signedIn` is the

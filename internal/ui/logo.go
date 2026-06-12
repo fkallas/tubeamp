@@ -2,8 +2,6 @@
 package ui
 
 import (
-	"fmt"
-	"image/color"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -29,56 +27,33 @@ const logoMinTermHeight = minHeight + logoHeight
 // appVersion is displayed in Muted style, right-aligned on the header row.
 const appVersion = "v0.1.0"
 
-// logoWordmark is the literal word drawn in the top-left. Each letter is tinted
-// with a theme-palette colour, and the colours cycle across the letters as the
-// animation phase advances (see renderWordmark).
+// logoWordmark is the literal word drawn in the top-left, rendered in the
+// theme's accent colour (see renderWordmark).
 const logoWordmark = "tubeamp"
 
-// renderWordmark draws the "tubeamp" wordmark with each letter coloured from the
-// theme palette: letter i takes palette[(i+phase) % len(palette)], so advancing
-// the phase flows the colours across the word over time. Colours come strictly
-// from theme tokens — ZERO hardcoded hex. The visible width is always
-// len(logoWordmark) columns regardless of phase, so the layout never shifts.
-func renderWordmark(th *theme.Theme, phase int) string {
-	pal := th.Palette()
-	if len(pal) == 0 {
-		// No palette tokens parsed: fall back to the primary text style.
-		return th.Primary().Render(logoWordmark)
-	}
-	if phase < 0 {
-		phase = -phase
-	}
-	var b strings.Builder
-	for i, r := range logoWordmark {
-		c := pal[(i+phase)%len(pal)]
-		b.WriteString(lipgloss.NewStyle().Foreground(lipglossColor(c)).Render(string(r)))
-	}
-	return b.String()
-}
-
-// lipglossColor converts an image/color.Color (the form theme.Palette() returns)
-// to a lipgloss colour via its "#rrggbb" hex string.
-func lipglossColor(c color.Color) lipgloss.Color {
-	r, g, b, _ := c.RGBA()
-	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", uint8(r>>8), uint8(g>>8), uint8(b>>8)))
+// renderWordmark draws the "tubeamp" wordmark in a single colour: the theme's
+// accent — the same hue that highlights the active panel's border. Colour comes
+// strictly from a theme token; no hardcoded hex.
+func renderWordmark(th *theme.Theme) string {
+	return th.AccentStyle().Render(logoWordmark)
 }
 
 // renderLogo returns the single-row wordmark header padded to exactly termWidth
 // visible columns so it slots cleanly above the panel area in a JoinVertical: the
-// colour-cycling "tubeamp" wordmark on the left, then the Muted version tag and
+// accent-coloured "tubeamp" wordmark on the left, then the Muted version tag and
 // the already-styled sign-in indicator right-aligned at the far edge (the
-// indicator's home today). phase drives the colour animation (see renderWordmark).
+// indicator's home today).
 //
 // A long account name must not silently drop the whole indicator nor widen the
 // row past termWidth (which would make JoinVertical pad every frame row and break
 // the full-width frame invariant): it is ANSI-aware-truncated with an ellipsis
 // to the columns left of the wordmark + version + the two gaps.
-func renderLogo(th *theme.Theme, termWidth, phase int, indicator string) string {
+func renderLogo(th *theme.Theme, termWidth int, indicator string) string {
 	if termWidth <= 0 {
 		return ""
 	}
 
-	word := renderWordmark(th, phase)
+	word := renderWordmark(th)
 	wordW := lipgloss.Width(word)
 
 	ver := th.Muted().Render(appVersion)

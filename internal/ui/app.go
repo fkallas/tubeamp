@@ -240,15 +240,6 @@ type Model struct {
 	lyricsScroll   int
 	lyricsDetached bool
 	lyricsResumeAt float64
-
-	// logoPhase advances on every logoTickMsg; the wordmark colours each letter
-	// from the theme palette at offset (i+logoPhase), so advancing it flows the
-	// colours across the word (see renderWordmark / logoTickCmd). logoTicking
-	// tracks whether a tick is pending: the tick stops re-arming while the
-	// header is hidden (height < logoMinTermHeight) and the resize handler
-	// re-arms it — guarded by this flag — when the header comes back.
-	logoPhase   int
-	logoTicking bool
 }
 
 // New constructs the root model. p (player), c (ytm client) and lib (library
@@ -280,7 +271,6 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		volume:           cfg.Volume,
 		hasAuth:          c != nil && c.Authenticated(),
 		reimportFn:       defaultReimport,
-		logoTicking:      true, // Init always arms the first wordmark tick
 	}
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
@@ -345,8 +335,6 @@ func (m Model) Init() tea.Cmd {
 	if m.lib != nil {
 		cmds = append(cmds, accountInfoCmd(m.lib))
 	}
-	// Drive the wordmark colour-cycle animation.
-	cmds = append(cmds, logoTickCmd())
 	return tea.Batch(cmds...)
 }
 
@@ -380,20 +368,6 @@ func (m Model) LyricsDetached() bool { return m.lyricsDetached }
 
 type playerEventMsg player.Event
 type playerClosedMsg struct{}
-
-// logoTickMsg drives the wordmark colour-cycle animation: each tick advances
-// m.logoPhase so the palette colours flow across the letters, then the view
-// re-renders. It carries no payload and is cheap — handling it just bumps an int
-// and re-arms the tick, never touching other Cmds.
-type logoTickMsg struct{}
-
-// logoTickInterval is the wordmark colour-cycle cadence.
-const logoTickInterval = 250 * time.Millisecond
-
-// logoTickCmd schedules the next wordmark animation tick.
-func logoTickCmd() tea.Cmd {
-	return tea.Tick(logoTickInterval, func(time.Time) tea.Msg { return logoTickMsg{} })
-}
 
 type artMsg struct {
 	videoID string
@@ -758,15 +732,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// depends on the band's visible rows).
 		m.reconcileLyricsFocus()
 		m.clampLyricsScroll()
-		// Re-arm the wordmark animation when a resize brings the header back
-		// after the tick paused itself while the header was hidden. logoTicking
-		// guards against arming a second tick while one is already pending.
-		var cmd tea.Cmd
-		if m.height >= logoMinTermHeight && !m.logoTicking {
-			m.logoTicking = true
-			cmd = logoTickCmd()
-		}
-		return m, cmd
+		return m, nil
 
 	case tea.KeyMsg:
 		// ctrl+c always quits, even with an overlay open.
@@ -1014,19 +980,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case lyricsMsg:
 		m.applyLyrics(msg)
 		return m, nil
-
-	case logoTickMsg:
-		// Advance the wordmark colour-cycle and re-arm the tick — but only while
-		// the header (the wordmark's only home) is on screen. When the terminal
-		// is too short the animation pauses instead of waking the UI 4×/s for an
-		// invisible wordmark; the resize handler re-arms it when the header
-		// returns. height 0 means no WindowSizeMsg yet — keep ticking.
-		if m.height > 0 && m.height < logoMinTermHeight {
-			m.logoTicking = false
-			return m, nil
-		}
-		m.logoPhase++
-		return m, logoTickCmd()
 	}
 
 	return m, nil
@@ -2032,14 +1985,14 @@ func (m Model) View() string {
 
 	// Wordmark header: one row (logoHeight), shown whenever the terminal has the
 	// headroom (>= logoMinTermHeight); at the very shortest height it is
-	// suppressed and the panel area reclaims the row. The colour-cycling
+	// suppressed and the panel area reclaims the row. The accent-coloured
 	// "tubeamp" wordmark sits top-left; the version tag and the sign-in indicator
-	// ride the same row, right-aligned. logoPhase drives the colour animation.
-	// When the header is hidden the indicator falls through to the status line.
+	// ride the same row, right-aligned. When the header is hidden the indicator
+	// falls through to the status line.
 	ind := m.authIndicator()
 	logo := ""
 	if m.height >= logoMinTermHeight {
-		logo = renderLogo(m.th, m.width, m.logoPhase, ind)
+		logo = renderLogo(m.th, m.width, ind)
 	}
 
 	leftW := clamp(m.width*3/10, 24, 40)
