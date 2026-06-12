@@ -244,3 +244,23 @@ func TestQuit(t *testing.T) {
 		t.Errorf("q command did not produce a quit message")
 	}
 }
+
+// TestLogoVisibleAtLargeTerminal asserts that the ASCII logo wordmark is present
+// in the rendered view when the terminal is tall enough (>= logoMinTermHeight).
+func TestLogoVisibleAtLargeTerminal(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "tubeamp") {
+		t.Errorf("View(120×40) should show the logo wordmark; \"tubeamp\" not found in:\n%s", v)
+	}
+}
+
+// TestLogoHiddenAtSmallTerminal asserts that the logo is suppressed when the
+// terminal height is below logoMinTermHeight (24) — the wordmark must not appear.
+func TestLogoHiddenAtSmallTerminal(t *testing.T) {
+	m := newTestModel(t, 120, 22)
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "tubeamp") {
+		t.Errorf("View(120×22) should hide the logo; \"tubeamp\" unexpectedly found")
+	}
+}

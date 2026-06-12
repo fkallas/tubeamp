@@ -266,6 +266,8 @@ func CompositeCenter(overlay, background string) string
 ### Layout
 
 ```
+╭◉╮ tubeamp                                          v0.1.0   ← logo header (2 rows)
+╰─╯ ─────────────────────────
 ╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
 ╰────────────╯│                                 │
@@ -279,6 +281,11 @@ func CompositeCenter(overlay, background string) string
 ╰───────────────────────────────────────────────────────────────────╯
  <context-sensitive key hints, single line>
 ```
+
+Logo header: 2 rows, at most ~28 cols for the glyph+wordmark. The glyph
+("╭◉╮") is rendered in AccentStyle, the wordmark "tubeamp" in Primary, and
+"v0.1.0" right-aligned in Muted. When terminal height < 24 the logo is hidden
+entirely and the panel area reclaims those 2 rows.
 
 Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 (items + border), Playlists/Queue split the rest. Player bar 4 content lines.

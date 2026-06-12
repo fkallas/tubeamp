@@ -798,9 +798,17 @@ func (m Model) View() string {
 		return m.tooSmall()
 	}
 
+	// Logo header: 2 rows when terminal is tall enough, otherwise hidden.
+	logo := renderLogo(m.th, m.width, m.height)
+	logoOff := 0
+	if logo != "" {
+		logoOff = logoHeight
+	}
+
 	leftW := clamp(m.width*3/10, 24, 40)
 	mainW := m.width - leftW
-	topH := m.height - 7 // player bar (6) + hint line (1)
+	// player bar (6) + hint line (1) + logo header rows
+	topH := m.height - 7 - logoOff
 
 	libH := len(m.libItems) + 2
 	rem := topH - libH
@@ -826,7 +834,13 @@ func (m Model) View() string {
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
 	hint := m.bottomLine()
 
-	base := lipgloss.JoinVertical(lipgloss.Left, topRow, bar, hint)
+	// Assemble: optional logo header then panels, player bar, hints.
+	parts := make([]string, 0, 4)
+	if logo != "" {
+		parts = append(parts, logo)
+	}
+	parts = append(parts, topRow, bar, hint)
+	base := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	if m.overlay != overlayNone {
 		return CompositeCenter(m.renderOverlay(), base)
