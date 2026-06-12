@@ -312,10 +312,19 @@ __Secure-*PSIDTS) to many responses. After every request `Client.post` folds
 expired names dropped). When the set changes, `Auth` re-serializes to the
 canonical `name=value; name=value` header — original order preserved, genuinely
 new names appended — and rewrites the source auth file atomically (temp+rename,
-0600). The merged set is used live for subsequent requests in the same process,
-so a healthy session stays alive instead of decaying from the moment the cookie
-was copied. The jar + file write are mutex-guarded (the daemon makes overlapping
-requests). An `Auth` with no source path updates memory only (never writes).
+0600). The rewrite first **three-way-merges the file's current contents**
+(judged against the state at the Auth's last load/persist): a name only another
+writer changed is adopted, a name only this Auth changed keeps its value, and a
+per-name conflict defers to the on-disk value. That keeps several live Auths
+bound to the same path — a `-status` probe beside a running TUI, or a superseded
+client after a browser re-import — from clobbering each other's rotations
+(plain whole-jar persistence would be last-writer-wins). The merged set is used
+live for subsequent requests in the same process, so a healthy session stays
+alive instead of decaying from the moment the cookie was copied. The jar + file
+write are mutex-guarded (the daemon makes overlapping requests), and
+`Client.post` reads the Cookie header and SAPISID as ONE locked snapshot so a
+rotation cannot pair a new cookie with a hash of the old SAPISID. An `Auth`
+with no source path updates memory only (never writes).
 
 ```go
 // package ytm
@@ -528,10 +537,16 @@ session (no reimport loop). The Cmd runs the injectable `reimportFn`
 `ytm.WriteAuthFile` → `LoadAuth` → rebuild `Client` → `AccountInfo`), returning a
 `reimportMsg`. On a signed-in result the model adopts the fresh client, flips the
 indicator to signed-in, toasts `session refreshed from <browser>`, and fills the
-Playlists panel; on failure/anonymous it toasts
-`re-import failed — run tubeamp -auth <browser>`. The re-import never blocks
-`Update` (it is a `tea.Cmd`). Tests inject `reimportFn` as a stub (signed-in stub
-⇒ indicator flips + toast; failing stub ⇒ fallback toast; fires at most once).
+Playlists panel. On a failed import (no fresh client) or a CONFIRMED anonymous
+result it toasts `re-import failed — run tubeamp -auth <browser>`. When the
+import succeeded but only the confirmation probe failed (offline/timeout), the
+fresh client is still adopted — the new cookies are on disk and must serve (and
+persist rotations for) subsequent requests — the resolved indicator state is
+left untouched (unconfirmed, mirroring the startup `accountInfoMsg` handler),
+and it toasts `re-imported from <browser> — could not confirm sign-in`. The
+re-import never blocks `Update` (it is a `tea.Cmd`). Tests inject `reimportFn`
+as a stub (signed-in stub ⇒ indicator flips + toast; failing stub ⇒ fallback
+toast; probe-error stub ⇒ client adopted, no failure toast; fires at most once).
 
 Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 (items + border), Playlists/Queue split the rest. Player bar 4 content lines.
@@ -684,9 +699,12 @@ browses never run from tests. Mock data lives in `internal/ui/mock.go`.
 does not open the TUI or touch the daemon). It imports via `auth.ImportFromBrowser`
 (stubbable `authImport` package var), writes the auth file with the shared
 `ytm.WriteAuthFile`, persists the browser as `cfg.AuthBrowser`, then confirms with
-a bounded `AccountInfo` (stubbable `confirmSignIn` var) — printing
-`signed in as <name>` or `imported, but YouTube still resolved anonymous — are you
-logged into <browser>?`. NEVER prints cookie values. The `-auth` flag accepts a
+a bounded `AccountInfo` (stubbable `confirmSignIn` var, which returns the probe
+error distinctly) — printing `signed in as <name>`, or `imported, but YouTube
+still resolved anonymous — are you logged into <browser>?`, or — when only the
+confirmation probe failed (offline/timeout; the import itself succeeded) —
+`imported from <browser>, but could not confirm the sign-in (<err>) — check
+later with tubeamp -status`. NEVER prints cookie values. The `-auth` flag accepts a
 value (`-auth chrome`, `-auth=chrome`) and stands alone (bare `-auth` ⇒ "auto"
 via a custom `flag.Value` with `IsBoolFlag`; the space form `-auth chrome` is
 recovered from the trailing positional).

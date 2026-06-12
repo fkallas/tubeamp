@@ -1122,6 +1122,38 @@ func TestAutoRefresh_failingStubFallbackToast(t *testing.T) {
 	}
 }
 
+// TestAutoRefresh_probeErrorAdoptsClient: when the import itself succeeded (the
+// auth file was rewritten, a fresh client exists) but the confirmation probe
+// failed (offline, timeout), the fresh client must be adopted — not discarded —
+// and the toast must not claim the re-import failed. The resolved sign-in state
+// stays untouched (unconfirmed), mirroring the startup accountInfoMsg handler.
+func TestAutoRefresh_probeErrorAdoptsClient(t *testing.T) {
+	fresh := ytm.NewClient(nil)
+	m := staleModel(t, "chrome", func(browser string, _ int) reimportMsg {
+		return reimportMsg{browser: browser, client: fresh, err: context.DeadlineExceeded}
+	})
+
+	updated, cmd := m.Update(accountInfoMsg{signedIn: false})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a reimport Cmd after an anonymous check")
+	}
+	m = send(m, cmd())
+
+	if m.c != fresh {
+		t.Error("fresh client not adopted after a probe-only failure")
+	}
+	if m.authSignedIn {
+		t.Error("sign-in must stay unconfirmed after a failed probe")
+	}
+	if strings.Contains(m.status, "re-import failed") {
+		t.Errorf("status = %q: a probe-only failure must not claim the re-import failed", m.status)
+	}
+	if !strings.Contains(m.status, "could not confirm sign-in") || m.statusErr {
+		t.Errorf("status = %q (err=%v), want an unconfirmed notice", m.status, m.statusErr)
+	}
+}
+
 // TestAutoRefresh_firesAtMostOnce: a second anonymous result (e.g. a later
 // library load that comes back logged out) must NOT fire another re-import.
 func TestAutoRefresh_firesAtMostOnce(t *testing.T) {

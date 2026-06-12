@@ -87,11 +87,14 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 	req.Header.Set("X-Origin", ytmOrigin)
 
 	if c.auth != nil {
-		sapisid, err := c.auth.SAPISID()
+		// One consistent snapshot: reading the SAPISID and the Cookie header
+		// under separate locks would let a concurrent rotation slip between the
+		// two and sign the request with a mismatched SAPISID.
+		header, sapisid, err := c.auth.headerAndSAPISID()
 		if err != nil {
 			return nil, fmt.Errorf("ytm: get SAPISID: %w", err)
 		}
-		req.Header.Set("Cookie", c.auth.Header())
+		req.Header.Set("Cookie", header)
 		req.Header.Set("Authorization", sapisidHash(sapisid, ytmOrigin, time.Now()))
 		req.Header.Set("X-Goog-AuthUser", strconv.Itoa(c.authUser))
 	}

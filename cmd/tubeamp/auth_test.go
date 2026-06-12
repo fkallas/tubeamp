@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,9 +16,15 @@ import (
 // originals are restored on cleanup.
 func stubAuthImport(t *testing.T, header string, importErr error, name string, signedIn bool) {
 	t.Helper()
+	stubAuthImportConfirmErr(t, header, importErr, name, signedIn, nil)
+}
+
+// stubAuthImportConfirmErr is stubAuthImport with a confirmation-probe error.
+func stubAuthImportConfirmErr(t *testing.T, header string, importErr error, name string, signedIn bool, confirmErr error) {
+	t.Helper()
 	origImport, origConfirm := authImport, confirmSignIn
 	authImport = func(string) (string, error) { return header, importErr }
-	confirmSignIn = func(*config.Config) (string, bool) { return name, signedIn }
+	confirmSignIn = func(*config.Config) (string, bool, error) { return name, signedIn, confirmErr }
 	t.Cleanup(func() { authImport, confirmSignIn = origImport, origConfirm })
 }
 
@@ -91,6 +98,33 @@ func TestRunAuthImport_anonymous(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "still resolved anonymous") || !strings.Contains(got, "firefox") {
 		t.Errorf("stdout = %q, want anonymous hint mentioning firefox", got)
+	}
+}
+
+// TestRunAuthImport_probeError: a successful import whose confirmation probe
+// fails (offline, timeout) must NOT print the misleading still-resolved-anonymous
+// hint — the sign-in state is unknown, not confirmed anonymous.
+func TestRunAuthImport_probeError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	stubAuthImportConfirmErr(t, "SAPISID=x", nil, "", false, context.DeadlineExceeded)
+
+	var out, errOut bytes.Buffer
+	if code := runAuthImport(&out, &errOut, config.Default(), "safari"); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	got := out.String()
+	if strings.Contains(got, "still resolved anonymous") {
+		t.Errorf("stdout = %q: a failed probe must not claim the session resolved anonymous", got)
+	}
+	if !strings.Contains(got, "could not confirm") {
+		t.Errorf("stdout = %q, want a could-not-confirm notice", got)
+	}
+	// The import did succeed: the auth file must exist.
+	if _, err := os.Stat(filepath.Join(config.DataDir(), "auth")); err != nil {
+		t.Errorf("auth file missing after successful import: %v", err)
 	}
 }
 

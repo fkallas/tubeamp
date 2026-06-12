@@ -19,19 +19,21 @@ import (
 var authImport = auth.ImportFromBrowser
 
 // confirmSignIn builds a throwaway client from the just-written auth file and
-// probes the live sign-in state under a short timeout. It is a package var so
-// tests can confirm without touching the network.
-var confirmSignIn = func(cfg *config.Config) (name string, signedIn bool) {
+// probes the live sign-in state under a short timeout. A non-nil err means the
+// probe itself failed (file unreadable, network down, timeout) — the sign-in
+// state is UNKNOWN, which the caller must not conflate with a confirmed
+// anonymous result. It is a package var so tests can confirm without touching
+// the network.
+var confirmSignIn = func(cfg *config.Config) (name string, signedIn bool, err error) {
 	a, err := ytm.LoadAuth(filepath.Join(config.DataDir(), "auth"))
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	c := ytm.NewClient(a)
 	c.SetAuthUser(cfg.AuthUser)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	name, signedIn, _ = c.AccountInfo(ctx)
-	return name, signedIn
+	return c.AccountInfo(ctx)
 }
 
 // authBrowserFlag implements the -auth flag. It doubles as a value flag
@@ -103,11 +105,16 @@ func runAuthImport(out, errOut io.Writer, cfg *config.Config, browser string) in
 		fmt.Fprintln(errOut, "tubeamp: could not save config:", err)
 	}
 
-	name, signedIn := confirmSignIn(cfg)
-	if signedIn {
+	name, signedIn, err := confirmSignIn(cfg)
+	switch {
+	case err != nil:
+		// The import itself succeeded and the auth file is written; only the
+		// confirmation probe failed (offline, timeout). Don't blame the cookies.
+		fmt.Fprintf(out, "imported from %s, but could not confirm the sign-in (%v) — check later with tubeamp -status\n", browser, err)
+	case signedIn:
 		fmt.Fprintf(out, "signed in as %s\n", name)
-		return 0
+	default:
+		fmt.Fprintf(out, "imported, but YouTube still resolved anonymous — are you logged into %s?\n", browser)
 	}
-	fmt.Fprintf(out, "imported, but YouTube still resolved anonymous — are you logged into %s?\n", browser)
 	return 0
 }

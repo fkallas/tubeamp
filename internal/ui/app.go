@@ -856,17 +856,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case reimportMsg:
-		// A failed import/write or a still-anonymous result falls back to a hint
-		// to run the explicit command; never retried (reimportTried stays set).
-		if msg.err != nil || !msg.signedIn {
+		// A failed import/write/load (no fresh client) or a CONFIRMED anonymous
+		// result falls back to a hint to run the explicit command; never retried
+		// (reimportTried stays set).
+		if msg.client == nil || (msg.err == nil && !msg.signedIn) {
 			m.setError("re-import failed — run tubeamp -auth " + msg.browser)
 			return m, nil
 		}
-		// Success: adopt the fresh client, flip the indicator to signed-in, and
-		// fill the Playlists panel just like the startup sign-in path does.
-		if msg.client != nil {
-			m.c = msg.client
-			m.hasAuth = true
+		// The import succeeded and the auth file was rewritten; adopt the fresh
+		// client even when only the confirmation probe failed (offline, timeout),
+		// so in-process requests use — and persist rotations for — the new
+		// cookies instead of the discarded stale jar. Mirroring the startup
+		// accountInfoMsg handler, a probe error leaves the resolved state alone
+		// rather than claiming anonymous or signed-in.
+		m.c = msg.client
+		m.hasAuth = true
+		if msg.err != nil {
+			m.setStatus("re-imported from " + msg.browser + " — could not confirm sign-in")
+			return m, nil
 		}
 		m.authChecked = true
 		m.authSignedIn = true

@@ -9,6 +9,9 @@
 .idea/
 .vscode/
 
-# Local auth/secrets must never be committed
-auth
+# Local auth/secrets must never be committed. The real credential lives outside
+# the repo (~/.local/share/tubeamp/auth); this guards a stray copy at the repo
+# root. Keep the pattern anchored: a bare "auth" also matches internal/auth/,
+# silently excluding that whole package from git.
+/auth
 *.cookie

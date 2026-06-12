@@ -138,7 +138,9 @@ tubeamp -auth            # bare -auth = "auto": try every supported browser
 
 It then confirms with the live API and prints `signed in as <name>` (or, if the
 cookies still resolve logged out, `imported, but YouTube still resolved
-anonymous — are you logged into <browser>?`). The browser you import from is
+anonymous — are you logged into <browser>?`; if the confirmation itself could
+not run — offline, timeout — it says so instead of blaming the cookies, and you
+can check later with `tubeamp -status`). The browser you import from is
 remembered in `config.yaml` (`auth_browser`), and the TUI uses it to silently
 re-import a session that has gone stale (see the rotation note below). A running
 browser does not block the read — tubeamp reads through a temporary copy of the
@@ -176,7 +178,10 @@ cookies (`SIDCC`, `__Secure-1PSIDCC`, sometimes `__Secure-*PSIDTS`) to many
 responses. tubeamp merges those refreshes into the live session and writes them
 back to the auth file atomically, so a session that started healthy keeps itself
 alive instead of decaying from the moment you copied the cookie — extending how
-long a sign-in lasts before you have to refresh the file by hand.
+long a sign-in lasts before you have to refresh the file by hand. The write-back
+also merges whatever is currently in the file, so concurrent users of the same
+auth file (say, a `tubeamp -status` in your tmux status bar next to the running
+TUI) keep each other's rotations instead of overwriting them.
 
 **The cookie-rotation gotcha.** Cookies copied from an *active* browser profile
 go stale within hours: Google continuously rotates the `__Secure-*PSIDTS`
@@ -192,8 +197,11 @@ imported it with `-auth`, the TUI fires a one-shot re-import from the remembered
 browser (`auth_browser`) — reading fresh cookies, rewriting the auth file, and
 re-checking — at most once per session. On success the status line shows
 `session refreshed from <browser>` and the indicator flips back to signed-in; on
-failure it shows `re-import failed — run tubeamp -auth <browser>`. So as long as
-the browser is still logged in, a stale tubeamp session usually heals itself.
+failure it shows `re-import failed — run tubeamp -auth <browser>`. If the
+re-import worked but the re-check could not run (offline), the fresh cookies are
+kept and the status says `re-imported from <browser> — could not confirm
+sign-in`. So as long as the browser is still logged in, a stale tubeamp session
+usually heals itself.
 
 The reliable manual trick is to copy the cookie from a **private /
 incognito** window: log in there, grab the Cookie header, then **close the window

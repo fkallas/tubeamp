@@ -4,6 +4,7 @@ package ytm
 import (
 	"crypto/sha1"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ type Auth struct {
 	mu      sync.Mutex
 	order   []string                             // cookie names in send order (load order; new names appended)
 	jar     map[string]string                    // live merged name->value set
+	base    map[string]string                    // file state as of the last load/persist (three-way merge base)
 	path    string                               // source file for write-back; "" disables persistence
 	gen     uint64                               // bumped whenever the live cookie set changes
 	writeFn func(path string, data []byte) error // injectable persistence (nil => atomicWriteFile)
@@ -54,6 +56,7 @@ func LoadAuth(path string) (*Auth, error) {
 	}
 	a := &Auth{Cookie: cookie, path: path}
 	a.order, a.jar = parseCookieHeader(cookie)
+	a.base = maps.Clone(a.jar)
 	return a, nil
 }
 
@@ -71,16 +74,27 @@ func (a *Auth) initLocked() {
 // "SAPISID" cookie and falls back to "__Secure-3PAPISID". A rotated value (rare,
 // but possible) takes effect here. Returns an error if neither is present.
 func (a *Auth) SAPISID() (string, error) {
+	_, sapisid, err := a.headerAndSAPISID()
+	return sapisid, err
+}
+
+// headerAndSAPISID returns the live Cookie header and the SAPISID (or
+// __Secure-3PAPISID fallback) under a SINGLE lock acquisition. Client.post must
+// use this instead of separate SAPISID()+Header() calls: a rotation merged
+// between the two reads would otherwise pair a Cookie header carrying the new
+// SAPISID with an Authorization hash computed from the old one, failing auth.
+func (a *Auth) headerAndSAPISID() (header, sapisid string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.initLocked()
+	header = serializeCookies(a.order, a.jar)
 	if v, ok := a.jar["SAPISID"]; ok {
-		return v, nil
+		return header, v, nil
 	}
 	if v, ok := a.jar["__Secure-3PAPISID"]; ok {
-		return v, nil
+		return header, v, nil
 	}
-	return "", fmt.Errorf("ytm: no SAPISID or __Secure-3PAPISID found in cookie")
+	return "", "", fmt.Errorf("ytm: no SAPISID or __Secure-3PAPISID found in cookie")
 }
 
 // Header returns the current Cookie header value to send, serialized from the
@@ -156,19 +170,83 @@ func (a *Auth) removeFromOrderLocked(name string) {
 	}
 }
 
-// persistLocked writes the serialized live set back to the source file. a.mu must
-// be held. An Auth with no path only updates memory. Persistence is best-effort:
-// a write failure leaves the in-memory set live and does not break the request.
+// persistLocked writes the serialized live set back to the source file, first
+// folding in any change another writer made to that file since our last
+// load/persist. a.mu must be held. An Auth with no path only updates memory.
+// Persistence is best-effort: a write failure leaves the in-memory set live and
+// does not break the request.
+//
+// The pre-write merge is what keeps several live Auths bound to the same path —
+// a `tubeamp -status` probe next to a running TUI, or a superseded client whose
+// in-flight requests trail in after a browser re-import rewrote the file — from
+// clobbering each other: a plain whole-jar rewrite would silently revert every
+// rotation the other writer had absorbed (last-writer-wins). The residual race
+// window between the read and the rename is milliseconds wide instead of
+// process-long, and each write stays atomic.
 func (a *Auth) persistLocked() {
 	if a.path == "" {
 		return
 	}
+	a.mergeFileLocked()
 	data := []byte(serializeCookies(a.order, a.jar) + "\n")
 	write := a.writeFn
 	if write == nil {
 		write = atomicWriteFile
 	}
-	_ = write(a.path, data)
+	if err := write(a.path, data); err == nil {
+		a.base = maps.Clone(a.jar)
+	}
+}
+
+// mergeFileLocked three-way-merges the auth file's current contents into the
+// live set before we overwrite the file. a.mu must be held. Differences are
+// judged against a.base, the file state as of our last load/persist:
+//
+//   - a name only the other writer changed (added, rotated, or dropped) is
+//     adopted from the file;
+//   - a name only we changed keeps our value (this is the rotation that
+//     triggered this persist);
+//   - a conflict (both changed) defers to the file — it is at least as fresh as
+//     our base, and in the re-import case it carries the newly imported cookie
+//     set, which must win over a stale session's trailing rotation.
+//
+// A missing or unreadable file merges nothing (we are about to recreate it).
+func (a *Auth) mergeFileLocked() {
+	data, err := os.ReadFile(a.path)
+	if err != nil {
+		return
+	}
+	_, fileJar := parseCookieHeader(strings.TrimSpace(string(data)))
+	for name, fileV := range fileJar {
+		baseV, inBase := a.base[name]
+		ourV, inJar := a.jar[name]
+		switch {
+		case inJar && fileV == ourV:
+			// Agreement; nothing to do.
+		case !inJar && inBase && fileV == baseV:
+			// Only we deleted it (Max-Age=0 rotation); keep it deleted.
+		case inJar && inBase && ourV != baseV && fileV == baseV:
+			// Only we changed it; our rotation wins.
+		default:
+			// The file added or rotated it (with or without a conflicting local
+			// change): adopt the file's value.
+			if !inJar {
+				a.order = append(a.order, name)
+			}
+			a.jar[name] = fileV
+		}
+	}
+	// Names the other writer dropped (present at our base, gone from the file)
+	// are dropped here too — unless we rotated them ourselves since the base.
+	for name, baseV := range a.base {
+		if _, inFile := fileJar[name]; inFile {
+			continue
+		}
+		if ourV, inJar := a.jar[name]; inJar && ourV == baseV {
+			delete(a.jar, name)
+			a.removeFromOrderLocked(name)
+		}
+	}
 }
 
 // cookieDeleted reports whether a Set-Cookie directs us to drop the cookie:

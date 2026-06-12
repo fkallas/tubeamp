@@ -167,6 +167,54 @@ func TestMerge_noPathMemoryOnly(t *testing.T) {
 	}
 }
 
+// TestPersist_mergesOtherInstanceRotation: two Auth instances bound to the same
+// file (e.g. a `tubeamp -status` probe next to a running TUI) each absorb a
+// different rotation. The later persist must fold in — not revert — the
+// rotation the other instance already wrote (a whole-jar last-writer-wins
+// rewrite would lose it and re-create the stale-session decay).
+func TestPersist_mergesOtherInstanceRotation(t *testing.T) {
+	a1, path := loadAuthFrom(t, "SID=a; SAPISID=sap; SIDCC=c0; __Secure-1PSIDTS=t0")
+	a2, err := LoadAuth(path)
+	if err != nil {
+		t.Fatalf("LoadAuth (second instance): %v", err)
+	}
+
+	a1.merge(setCookies("__Secure-1PSIDTS=t1")) // instance 1 rotates + persists
+	a2.merge(setCookies("SIDCC=c1"))            // instance 2 persists last
+
+	want := "SID=a; SAPISID=sap; SIDCC=c1; __Secure-1PSIDTS=t1"
+	if got := readHeader(t, path); got != want {
+		t.Errorf("file = %q, want %q (both rotations kept)", got, want)
+	}
+	if got := a2.Header(); got != want {
+		t.Errorf("a2.Header() = %q, want %q (file rotation absorbed)", got, want)
+	}
+}
+
+// TestPersist_freshImportSurvivesStaleRotation: a browser re-import rewrites the
+// auth file out from under a still-live Auth (the superseded client). When that
+// stale instance absorbs a trailing rotation and persists, the freshly imported
+// set must win: names only the file changed are adopted, the conflicted name
+// defers to the file, and a name the import dropped stays dropped.
+func TestPersist_freshImportSurvivesStaleRotation(t *testing.T) {
+	a, path := loadAuthFrom(t, "SID=old; SAPISID=oldsap; SIDCC=oldcc; EXTRA=x")
+
+	const fresh = "SID=new; SAPISID=newsap; SIDCC=newcc; NEW=1"
+	if err := WriteAuthFile(path, fresh); err != nil {
+		t.Fatalf("WriteAuthFile: %v", err)
+	}
+
+	// The stale instance gets a routine rotation on a trailing response.
+	a.merge(setCookies("SIDCC=stalecc"))
+
+	if got := readHeader(t, path); got != fresh {
+		t.Errorf("file = %q, want the freshly imported set %q", got, fresh)
+	}
+	if got := a.Header(); got != fresh {
+		t.Errorf("a.Header() = %q, want %q (stale jar recovered to the import)", got, fresh)
+	}
+}
+
 // TestMerge_concurrentThroughClient: a 20-goroutine burst of overlapping
 // requests (each absorbing a rotated cookie) must keep the file parseable and
 // never lose an unrelated cookie. Runs against a fake server, never the real
