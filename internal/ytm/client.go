@@ -18,16 +18,15 @@ const (
 	ytmOrigin = "https://music.youtube.com"
 	ytmUA     = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-	// songsFilterParams is the InnerTube search params value that restricts
-	// results to songs only (MUSIC_SEARCH_TYPE_SONG).
-	// TODO: verify against ytmusicapi
-	songsFilterParams = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D"
+	// songsFilterParams restricts search results to songs only. Verified
+	// against ytmusicapi get_search_params (scope=None, filter="songs",
+	// ignore_spelling=False): "EgWKAQ" + "II" + "AWoMEA4QChADEAQQCRAF".
+	songsFilterParams = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
 
-	// albumsFilterParams is the InnerTube search params value that restricts
-	// results to albums only. Same envelope as songsFilterParams with the
-	// type segment changed from "II" (songs) to "IY" (albums).
-	// TODO: verify against ytmusicapi
-	albumsFilterParams = "EgWKAQIYAWoKEAkQBRAKEAMQBA%3D%3D"
+	// albumsFilterParams restricts search results to albums only. Same
+	// envelope with the type segment "IY" (albums) instead of "II" (songs),
+	// per ytmusicapi _get_param2.
+	albumsFilterParams = "EgWKAQIYAWoMEA4QChADEAQQCRAF"
 )
 
 // Client is an authenticated or unauthenticated InnerTube client for YouTube Music.

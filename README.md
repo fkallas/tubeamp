@@ -23,6 +23,12 @@ renderer work end to end with mock library data; the YT Music API client wires
 unauthenticated song/album search and album browsing into the search view, with
 library/playlists/radio not yet.
 
+Note: anonymous InnerTube **album** search only surfaces self-distributed
+releases — YouTube withholds the major-label catalog from unauthenticated
+clients (ytmusicapi behaves identically). Song search is unaffected. Full album
+results need cookie auth (`~/.local/share/tubeamp/auth`), which the client
+already supports.
+
 ## Requirements
 
 - Go 1.22+ (build)
