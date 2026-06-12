@@ -225,8 +225,8 @@ to ~2s so it never stalls if the network is down).
 ## Themes
 
 Built-ins: catppuccin-mocha, catppuccin-latte, gruvbox-dark, nord, dracula,
-tokyo-night, cyberpunk (a neon magenta/cyan-on-deep-purple theme). Drop your own
-YAML in `~/.config/tubeamp/themes/` and set
+tokyo-night, cyberpunk (a neon magenta/cyan-on-deep-purple theme). cyberpunk is
+the default. Drop your own YAML in `~/.config/tubeamp/themes/` and set
 `theme: <name>` in `~/.config/tubeamp/config.yaml`, or pick live with `T`.
 
 Pixel-art covers render in the artwork's own colors by default

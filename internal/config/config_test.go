@@ -9,8 +9,8 @@ import (
 
 func TestDefault(t *testing.T) {
 	cfg := Default()
-	if cfg.Theme != "catppuccin-mocha" {
-		t.Errorf("Default theme: got %q, want %q", cfg.Theme, "catppuccin-mocha")
+	if cfg.Theme != "cyberpunk" {
+		t.Errorf("Default theme: got %q, want %q", cfg.Theme, "cyberpunk")
 	}
 	if cfg.Volume != 80 {
 		t.Errorf("Default volume: got %d, want 80", cfg.Volume)
@@ -133,8 +133,37 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("Load() with missing file: got nil config, want Default()")
 	}
 	// Should return defaults
-	if cfg.Theme != "catppuccin-mocha" || cfg.Volume != 80 {
+	if cfg.Theme != "cyberpunk" || cfg.Volume != 80 {
 		t.Errorf("Load() missing file: got %+v, want defaults", cfg)
+	}
+}
+
+// TestLoadEmptyThemeFallsBackToCyberpunk asserts a config that sets theme to an
+// empty string round-trips through the Load() empty-string fallback to the
+// cyberpunk default rather than leaving the theme blank.
+func TestLoadEmptyThemeFallsBackToCyberpunk(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	configDir := filepath.Join(tmpDir, "tubeamp")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("theme: \"\"\nvolume: 50\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.Theme != "cyberpunk" {
+		t.Errorf("empty theme: got %q, want cyberpunk", cfg.Theme)
+	}
+	// The non-empty field set in the YAML must survive the fallback.
+	if cfg.Volume != 50 {
+		t.Errorf("Volume: got %d, want 50", cfg.Volume)
 	}
 }
 

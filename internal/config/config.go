@@ -20,7 +20,7 @@ const (
 
 // Config holds tubeamp's user settings.
 type Config struct {
-	Theme      string `yaml:"theme"`       // catppuccin-mocha by default
+	Theme      string `yaml:"theme"`       // cyberpunk by default
 	Volume     int    `yaml:"volume"`      // 0-100, default 80; 0 treated as unset
 	MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
 	YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
@@ -35,7 +35,7 @@ type Config struct {
 // Default returns the default configuration.
 func Default() *Config {
 	return &Config{
-		Theme:      "catppuccin-mocha",
+		Theme:      "cyberpunk",
 		Volume:     80,
 		MPVPath:    "mpv",
 		YTDLFormat: "bestaudio",
@@ -63,7 +63,7 @@ func Load() (*Config, error) {
 
 	// Fill in defaults for unset fields
 	if cfg.Theme == "" {
-		cfg.Theme = "catppuccin-mocha"
+		cfg.Theme = "cyberpunk"
 	}
 	if cfg.Volume == 0 {
 		cfg.Volume = 80

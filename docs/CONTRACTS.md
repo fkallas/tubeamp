@@ -59,7 +59,7 @@ type Artist struct{ BrowseID, Name, ThumbURL string }
 
 ```go
 type Config struct {
-    Theme      string `yaml:"theme"`       // default "catppuccin-mocha"
+    Theme      string `yaml:"theme"`       // default "cyberpunk"
     Volume     int    `yaml:"volume"`      // 0-100, default 80
     MPVPath    string `yaml:"mpv_path"`    // default "mpv" (PATH lookup)
     YTDLFormat string `yaml:"ytdl_format"` // default "bestaudio"
@@ -491,9 +491,9 @@ func CompositeCenter(overlay, background string) string
 ### Layout
 
 ```
-▛▀▜                                                  v0.1.0   ← logo header (3 rows)
-▌▶▐ tubeamp ▓▒░
-▙▄▟━━━━━━━━━━━━━━━━━━━━━━━━━━━              ● account
+╭─────────────╮                                      v0.1.0   ← logo header (3 rows)
+│ ◉ ◎ ◉ ┃┃┃ │  tubeamp
+╰─────────────╯  ───────                   ● account
 ╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
 ╰────────────╯│                                 │
@@ -508,13 +508,15 @@ func CompositeCenter(overlay, background string) string
  <context-sensitive key hints, single line>
 ```
 
-Logo header: 3 rows (a cyberpunk wordmark — `logoHeight`), at most ~28 cols for
-the emblem+wordmark. The emblem ("▛▀▜"/"▌▐"/"▙▄▟") + glitch tail ("▓▒░") render
-in AccentStyle, the ▶ play glyph in PlayingStyle (so it glows), the wordmark
-"tubeamp" in Primary, the underline rule + "v0.1.0" (right-aligned, row 1) in
-Muted. When terminal height < `logoMinTermHeight` (25) the logo is hidden
-entirely and the panel area reclaims those rows. Colours come strictly from
-theme tokens — no hardcoded hex.
+Logo header: 3 rows (`logoHeight`), an "amp with knobs" motif — a small
+box-drawn amplifier cabinet with a row of round knobs and a speaker grille on
+the left, the "tubeamp" wordmark to its right, and a short underline rule
+beneath the wordmark (whole motif ~24 cols). The cabinet border renders in
+AccentStyle, the leftmost ("power") knob in PlayingStyle (so it glows) with the
+remaining knobs in AccentStyle, the speaker grille + underline rule + "v0.1.0"
+(right-aligned, row 1) in Muted, and the wordmark in Primary. When terminal
+height < `logoMinTermHeight` (25) the logo is hidden entirely and the panel area
+reclaims those rows. Colours come strictly from theme tokens — no hardcoded hex.
 
 Sign-in indicator: when the ytm client is non-nil the model fires a one-shot
 `AccountInfo` Cmd on startup (`Init`); the resolved state is shown persistently

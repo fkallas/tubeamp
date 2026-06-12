@@ -329,14 +329,14 @@ func TestLogoVisibleAtLargeTerminal(t *testing.T) {
 	}
 }
 
-// TestLogoWordmarkAndIndicator asserts the 3-row cyberpunk logo renders the
-// "tubeamp" wordmark, the ▶ play glyph, the right-aligned version, AND that the
-// sign-in indicator still rides the logo's rule row alongside the taller logo.
+// TestLogoWordmarkAndIndicator asserts the 3-row amp-and-knobs logo renders the
+// "tubeamp" wordmark, a knob glyph from the amp face, the right-aligned version,
+// AND that the sign-in indicator still rides the logo's rule row alongside it.
 func TestLogoWordmarkAndIndicator(t *testing.T) {
 	m := newTestModel(t, 120, 40)
 	m = send(m, accountInfoMsg{name: "Felipe Kallas", signedIn: true})
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"tubeamp", "▶", appVersion, "● Felipe Kallas"} {
+	for _, want := range []string{"tubeamp", "◉", appVersion, "● Felipe Kallas"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("logo view missing %q in:\n%s", want, v)
 		}
