@@ -32,7 +32,9 @@ way; search and playback always use the cookie/anonymous InnerTube client. An
 **anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
 remaining Library sections (Albums/Artists/Songs/History) are still mock.
 Library tracks loaded over the Data API show no album column or duration (the
-Data API does not expose them; the duration fills in from mpv once a track plays).
+Data API does not expose them; the duration fills in from mpv once a track
+plays), and the Data API library differs slightly in content from a cookie
+session — see the OAuth caveats under [Signing in](#signing-in).
 
 Time-synced lyrics are surfaced in a panel below the main view while a track
 plays: LRC fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube
@@ -211,8 +213,8 @@ InnerTube client either way. `-logout` just deletes `oauth.json`.
 
 If Google ever revokes the token (you removed the app's access, or the consent
 screen's test-mode tokens expired), the TUI says **`sign-in expired — run
-tubeamp -login`** on the status line and the header indicator shows
-`○ anonymous — run tubeamp -login` — one `tubeamp -login` signs you back in.
+tubeamp -login`** on the status line and the header indicator drops out of the
+signed-in state — one `tubeamp -login` signs you back in.
 The browser cookie auto-refresh below never kicks in for an OAuth session.
 
 What OAuth unlocks is durable **library** access — your Liked Songs and
@@ -225,6 +227,12 @@ never drive it). A couple of caveats:
 - OAuth does **not** change album-search ranking. The thin album-search results
   for some queries are an InnerTube quirk, already worked around by the
   song-derived album fallback; signing in (either way) does not affect it.
+- The Data API has no equivalent of YT Music's library views, so the content
+  differs slightly from a cookie session: "Liked Songs" is YouTube's
+  **liked-videos** auto-playlist ("LL") — every video you ever liked, music or
+  not — rather than YT Music's narrower Liked Music list, and the Playlists
+  panel lists only playlists you **own** (playlists you saved/followed from
+  other channels do not appear).
 - The Data API does not expose a track's album or duration, so Liked Songs /
   playlist rows loaded over OAuth show an empty album column and a blank duration
   in the list (the duration fills in from mpv once the track plays).

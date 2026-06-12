@@ -105,9 +105,25 @@ func (c *Client) Account(ctx context.Context) (string, error) {
 	return resp.Items[0].Snippet.Title, nil
 }
 
-// LibraryPlaylists returns the user's playlists via
+// AccountInfo reports the OAuth session state for the UI's library-provider
+// seam, mirroring ytm.Client.AccountInfo's shape. Unlike a cookie session — where
+// an empty account menu means "anonymous" — ANY successful channels?mine=true
+// response proves the OAuth token is live, so signedIn is true even when the
+// Google account has no YouTube channel (empty items ⇒ name ""). Only an
+// HTTP/transport/refresh failure returns an error (session state unknown).
+func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, err error) {
+	name, err = c.Account(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return name, true, nil
+}
+
+// LibraryPlaylists returns the playlists the user OWNS via
 // playlists?part=snippet,contentDetails&mine=true, following nextPageToken until
-// exhausted or the ~200 item cap is reached.
+// exhausted or the ~200 item cap is reached. NOTE: unlike the cookie path's
+// FEmusic_liked_playlists browse, mine=true does not include saved/followed
+// playlists from other channels — the Data API exposes no equivalent.
 func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error) {
 	var out []model.Playlist
 	pageToken := ""
@@ -155,7 +171,10 @@ func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model
 }
 
 // LikedSongs returns the user's liked videos via the "LL" auto-playlist, the
-// same shape as PlaylistTracks (first ~2 pages / ~100 tracks).
+// same shape as PlaylistTracks (first ~2 pages / ~100 tracks). NOTE: "LL" is
+// YouTube's all-liked-VIDEOS list (music or not) — broader than YT Music's
+// Liked Music (the cookie path's "VLLM" browse), which the Data API does not
+// expose.
 func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error) {
 	tracks, err := c.playlistItems(ctx, "LL")
 	if err != nil {

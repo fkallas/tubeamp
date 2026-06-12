@@ -81,6 +81,43 @@ func TestAccount_httpError(t *testing.T) {
 	}
 }
 
+// TestAccountInfo_signedInStates asserts AccountInfo's OAuth semantics: ANY
+// successful channels response — with a channel or with empty items (a Google
+// account that never created a YouTube channel) — is a live session
+// (signedIn=true); only a request failure reports (.., false, err).
+func TestAccountInfo_signedInStates(t *testing.T) {
+	cases := []struct {
+		label    string
+		status   int
+		body     string
+		wantName string
+		wantOK   bool
+		wantErr  bool
+	}{
+		{"channel", http.StatusOK, `{"items":[{"snippet":{"title":"Ada Lovelace"}}]}`, "Ada Lovelace", true, false},
+		{"no channel", http.StatusOK, `{"items":[]}`, "", true, false},
+		{"http error", http.StatusUnauthorized, `{"error":{"code":401}}`, "", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(t, srv)
+			name, signedIn, err := c.AccountInfo(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("AccountInfo err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if name != tc.wantName || signedIn != tc.wantOK {
+				t.Errorf("AccountInfo = (%q, %v), want (%q, %v)", name, signedIn, tc.wantName, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestLibraryPlaylists_paginates(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

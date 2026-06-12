@@ -537,11 +537,20 @@ func (c *Client) Account(ctx context.Context) (name string, err error)
                                        // channels?part=snippet&mine=true ->
                                        // items[0].snippet.title. Empty items =>
                                        // ("", nil); HTTP error => err.
+func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, err error)
+                                       // the library-provider seam probe. OAuth
+                                       // semantics: ANY successful channels call is
+                                       // a live session => signedIn=true even when
+                                       // the account has no YouTube channel (name
+                                       // ""); only a failed request => (.., false, err).
 func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
                                        // playlists?part=snippet,contentDetails&mine=true
                                        // &maxResults=50, follows nextPageToken to a
                                        // ~200 cap. id->ID, title->Title,
                                        // contentDetails.itemCount->TrackCount.
+                                       // OWNED playlists only — mine=true returns no
+                                       // saved/followed playlists, unlike the cookie
+                                       // FEmusic_liked_playlists browse.
 func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model.Track, error)
                                        // playlistItems?part=snippet,contentDetails
                                        // &playlistId=<id>&maxResults=50, first ~2
@@ -549,7 +558,11 @@ func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model
                                        // mapVideo per item; items with no videoId
                                        // (deleted/private) are skipped.
 func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error)
-                                       // PlaylistTracks against playlistId="LL".
+                                       // PlaylistTracks against playlistId="LL" —
+                                       // YouTube's all-liked-VIDEOS auto-playlist
+                                       // (music or not), broader than YT Music's
+                                       // Liked Music ("VLLM"), which only the cookie
+                                       // path can browse.
 ```
 
 `mapVideo` maps a playlistItems snippet+contentDetails to a `model.Track`:
@@ -678,14 +691,17 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 // pointer would wrongly trip the m.lib != nil guard).
 
 // libraryProvider is the unexported seam the UI reads the user's library through
-// (sign-in name + playlists + liked songs + a playlist's tracks). Both the
-// OAuth-backed *ytdata.Client and a cookie *ytm.Client satisfy it as-is (the
-// ytm.Client.Account wrapper maps AccountInfo to (name, err)). Search, album
-// browsing and playback stay on m.c (*ytm.Client, InnerTube). canLoadLibrary() is
-// simply `m.lib != nil`; a configured-but-stale source still attempts the browse
-// and degrades on ErrNotSignedIn.
+// (sign-in state + playlists + liked songs + a playlist's tracks). Both the
+// OAuth-backed *ytdata.Client and a cookie *ytm.Client satisfy it as-is. Each
+// source's AccountInfo reports signedIn on its own terms — cookie: the account
+// menu resolved a signed-in account; OAuth: any successful probe is a live
+// session, INCLUDING a channel-less account with name "" (the indicator then
+// falls back to "● signed in") — so signedIn is never derived from a non-empty
+// name. Search, album browsing and playback stay on m.c (*ytm.Client,
+// InnerTube). canLoadLibrary() is simply `m.lib != nil`; a configured-but-stale
+// source still attempts the browse and degrades on ErrNotSignedIn.
 type libraryProvider interface {
-    Account(context.Context) (string, error)
+    AccountInfo(context.Context) (name string, signedIn bool, err error)
     LibraryPlaylists(context.Context) ([]model.Playlist, error)
     LikedSongs(context.Context) ([]model.Track, error)
     PlaylistTracks(context.Context, string) ([]model.Track, error)
@@ -737,8 +753,10 @@ panel area reclaims that row (the panel-area floor needs that row at the shortes
 size). Colours come strictly from theme tokens/palette — no hardcoded hex.
 
 Sign-in indicator: when the **library source** (`m.lib`) is non-nil the model
-fires a one-shot `lib.Account` Cmd on startup (`Init`); `signedIn` is derived
-from a non-empty name. The resolved state is shown persistently
+fires a one-shot `lib.AccountInfo` Cmd on startup (`Init`); `signedIn` is the
+source's own verdict, never derived from a non-empty name (an OAuth account with
+no YouTube channel resolves name "" + signedIn true and renders the
+"● signed in" fallback). The resolved state is shown persistently
 at the right end of the wordmark header row (ANSI-aware-truncated with an
 ellipsis when a long account name would not fit), or right-aligned on the bottom
 status line when the header is hidden (truncated the same way — on either home an
@@ -762,7 +780,7 @@ Tests inject the result via `accountInfoMsg`, never the network.
 
 **Stale-session auto-refresh (cookie sessions).** When the resolved state is
 anonymous (the startup
-`lib.Account` check, or a library browse via the downgrade path) AND
+`lib.AccountInfo` check, or a library browse via the downgrade path) AND
 `cfg.AuthBrowser` is set AND an auth file is present (`hasAuth`), the model fires
 a ONE-SHOT
 re-import `Cmd` — guarded by `reimportTried` so it happens at most once per
@@ -979,12 +997,21 @@ func listenPlayer(p *player.Player) tea.Cmd {
 
 All real library data is read through the `libraryProvider` seam (`m.lib`) — the
 OAuth `*ytdata.Client` (durable, official Data API: playlists + liked songs) or a
-cookie `*ytm.Client`. `canLoadLibrary()` is `m.lib != nil`. When a source is
+cookie `*ytm.Client`. `canLoadLibrary()` is `m.lib != nil`. The two sources are
+wired identically but are NOT content-identical: over the Data API, "Liked
+Songs" is YouTube's liked-VIDEOS auto-playlist ("LL" — every liked video, music
+or not; the cookie path browses YT Music's Liked Music, "VLLM"), and
+`LibraryPlaylists` returns only playlists the user OWNS (`mine=true` — the
+cookie `FEmusic_liked_playlists` browse also includes saved/followed playlists).
+The README documents this divergence under the OAuth caveats. When a source is
 present, real data replaces the mock:
 
-- On a signed-in startup result (`accountInfoMsg`, from `lib.Account`) the model
-  fires `lib.LibraryPlaylists` (guarded by `plGen`) and replaces the Playlists
-  panel with the user's real playlists.
+- On a signed-in startup result (`accountInfoMsg`, from `lib.AccountInfo`) the
+  model fires `lib.LibraryPlaylists` (guarded by `plGen`) and replaces the
+  Playlists panel with the user's real playlists. signedIn is the source's own
+  verdict — an OAuth account with no YouTube channel resolves (name "",
+  signedIn true) and still counts as signed in (indicator fallback
+  "● signed in"), so the fill fires and the cookie re-import does not.
 - Library "Liked Songs" `enter` → `lib.LikedSongs` Cmd into the main view; a
   playlist `enter` → `lib.PlaylistTracks` into the main view titled by the
   playlist name —

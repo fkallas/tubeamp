@@ -100,13 +100,18 @@ type mainContent struct {
 }
 
 // libraryProvider is the seam through which the UI reads the user's real library
-// (sign-in name, playlists, liked songs, a playlist's tracks). Both the
+// (sign-in state, playlists, liked songs, a playlist's tracks). Both the
 // OAuth-backed *ytdata.Client (durable, official Data API) and a cookie
 // *ytm.Client satisfy it, so cmd/tubeamp can pick the source without the UI
 // caring which. A nil interface means "no library source" → mock data + sign-in
 // hint. Search, album browsing and playback resolution stay on *ytm.Client (m.c).
+// AccountInfo lets each source report signedIn on its own terms: a cookie session
+// is anonymous when the account menu is empty, while an OAuth session is live
+// whenever the probe succeeds — even for an account with no YouTube channel
+// (name "") — so signedIn must come from the source, never be derived from a
+// non-empty name.
 type libraryProvider interface {
-	Account(context.Context) (string, error)
+	AccountInfo(context.Context) (name string, signedIn bool, err error)
 	LibraryPlaylists(context.Context) ([]model.Playlist, error)
 	LikedSongs(context.Context) ([]model.Track, error)
 	PlaylistTracks(context.Context, string) ([]model.Track, error)
@@ -436,8 +441,9 @@ type statusMsg struct {
 }
 
 // accountInfoMsg carries the one-shot sign-in check result from the library
-// source (lib.Account): name is the account/channel name and signedIn is whether
-// it resolved to one; err is set when the check could not run (network down, or a
+// source (lib.AccountInfo): name is the account/channel name (may be "" for a
+// signed-in OAuth account with no YouTube channel) and signedIn is the source's
+// own verdict; err is set when the check could not run (network down, or a
 // revoked OAuth token), in which case the indicator stays unresolved.
 type accountInfoMsg struct {
 	name     string
@@ -581,15 +587,16 @@ func artFetchCmd(t model.Track) tea.Cmd {
 
 // accountInfoCmd runs the one-shot sign-in check against the library source. It
 // is bounded by a short timeout so a dead network resolves quickly into an err
-// (indicator stays unresolved) rather than hanging. signedIn is derived from a
-// non-empty account name (lib.Account returns the channel/account name, or "" for
-// a logged-out session).
+// (indicator stays unresolved) rather than hanging. signedIn comes from the
+// source itself, NOT from a non-empty name: an OAuth account without a YouTube
+// channel resolves (name "", signedIn true), which must read as signed in (the
+// indicator falls back to "● signed in") rather than as no session at all.
 func accountInfoCmd(lib libraryProvider) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		name, err := lib.Account(ctx)
-		return accountInfoMsg{name: name, signedIn: name != "", err: err}
+		name, signedIn, err := lib.AccountInfo(ctx)
+		return accountInfoMsg{name: name, signedIn: signedIn, err: err}
 	}
 }
 

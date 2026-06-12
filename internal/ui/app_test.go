@@ -32,6 +32,7 @@ func newTestModel(t *testing.T, w, h int) Model {
 // exercised without any network. A nil error field returns the canned slice.
 type fakeLibrary struct {
 	name      string
+	signedIn  bool // the source's own verdict; independent of name (OAuth: "" + true)
 	playlists []model.Playlist
 	liked     []model.Track
 	tracks    map[string][]model.Track // by playlist id
@@ -48,9 +49,9 @@ type fakeLibrary struct {
 	playlistTracks int
 }
 
-func (f *fakeLibrary) Account(context.Context) (string, error) {
+func (f *fakeLibrary) AccountInfo(context.Context) (string, bool, error) {
 	f.accountCalls++
-	return f.name, f.accountErr
+	return f.name, f.signedIn, f.accountErr
 }
 
 func (f *fakeLibrary) LibraryPlaylists(context.Context) ([]model.Playlist, error) {
@@ -1553,22 +1554,63 @@ func newLibModel(t *testing.T, lib libraryProvider) Model {
 }
 
 // TestLibProviderAccountFillsIndicator asserts the startup sign-in check reads
-// the channel name from lib.Account and renders it as "● <name>".
+// the channel name from lib.AccountInfo and renders it as "● <name>".
 func TestLibProviderAccountFillsIndicator(t *testing.T) {
-	f := &fakeLibrary{name: "Ada Lovelace"}
+	f := &fakeLibrary{name: "Ada Lovelace", signedIn: true}
 	m := newLibModel(t, f)
 
-	// The Cmd Init fires resolves to this accountInfoMsg via lib.Account.
+	// The Cmd Init fires resolves to this accountInfoMsg via lib.AccountInfo.
 	m = send(m, accountInfoCmd(f)())
 
 	if f.accountCalls != 1 {
-		t.Errorf("lib.Account called %d times, want 1", f.accountCalls)
+		t.Errorf("lib.AccountInfo called %d times, want 1", f.accountCalls)
 	}
 	if !m.authChecked || !m.authSignedIn || m.authName != "Ada Lovelace" {
 		t.Fatalf("indicator state: checked=%v signedIn=%v name=%q", m.authChecked, m.authSignedIn, m.authName)
 	}
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "● Ada Lovelace") {
-		t.Errorf("view missing signed-in indicator from lib.Account:\n%s", v)
+		t.Errorf("view missing signed-in indicator from lib.AccountInfo:\n%s", v)
+	}
+}
+
+// TestLibProviderOAuthNoChannelStillSignedIn covers the OAuth account that has
+// no YouTube channel: ytdata.AccountInfo resolves (name "", signedIn true), and
+// the UI must read that as a live session — the "● signed in" fallback indicator
+// (never "○ not signed in"), the startup playlists fill firing, and no cookie
+// re-import even with a leftover auth file + remembered browser.
+func TestLibProviderOAuthNoChannelStillSignedIn(t *testing.T) {
+	f := &fakeLibrary{
+		signedIn:  true, // live OAuth session; no channel => name ""
+		playlists: []model.Playlist{{ID: "PLreal", Title: "Road Mix"}},
+	}
+	m := newLibModel(t, f)
+	// A leftover cookie auth file + remembered browser must NOT trigger a
+	// re-import while the OAuth library session is live.
+	m.hasAuth = true
+	m.cfg.AuthBrowser = "chrome"
+
+	mm, cmd := m.Update(accountInfoCmd(f)())
+	m = mm.(Model)
+
+	if !m.authChecked || !m.authSignedIn || m.authName != "" {
+		t.Fatalf("indicator state: checked=%v signedIn=%v name=%q", m.authChecked, m.authSignedIn, m.authName)
+	}
+	if m.reimportTried {
+		t.Error("signed-in (channel-less) OAuth session wrongly fired the cookie re-import")
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "● signed in") {
+		t.Errorf("view missing the signed-in fallback indicator:\n%s", v)
+	}
+	if cmd == nil {
+		t.Fatal("signed-in (channel-less) account did not trigger the playlists fill")
+	}
+	msg := cmd()
+	if _, ok := msg.(libPlaylistsMsg); !ok {
+		t.Fatalf("follow-up cmd resolved %T, want libPlaylistsMsg", msg)
+	}
+	m = send(m, msg)
+	if f.playlistCalls != 1 || !m.playlistsReal {
+		t.Errorf("playlists fill: calls=%d real=%v, want 1/true", f.playlistCalls, m.playlistsReal)
 	}
 }
 
