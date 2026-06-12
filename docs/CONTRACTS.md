@@ -585,12 +585,12 @@ func CompositeCenter(overlay, background string) string
 ╰─────────────╯  ───────                   ● account
 ╭─1 Library──╮╭─4 <context title> ─────────────╮
 │            ││                                 │
-╰────────────╯│                                 │
-╭─2 Playlists╮│      main view                  │
+╰────────────╯│      main view                  │
+╭─2 Playlists╮│                                 │
 │            ││                                 │
-╰────────────╯│                                 │
-╭─3 Queue────╮│                                 │
-│            ││                                 │
+╰────────────╯╰─────────────────────────────────╮
+╭─3 Queue────╮│ Lyrics                 ♪ synced  │  ← only while playing + tall
+│            ││   …synced lyrics window…         │     enough; never focusable
 ╰────────────╯╰─────────────────────────────────╯
 ╭─ player bar (art 8×4 cells │ title/artist/album │ progress, vol) ─╮
 ╰───────────────────────────────────────────────────────────────────╯
@@ -673,6 +673,44 @@ The main view is a stack of frames; a frame is one of three kinds:
   `panels.AlbumCoverCols`×`panels.AlbumCoverRows` (16×8) pixel-art cover on the
   left and the album title (Accent), artists, year + track count (Muted) to its
   right; below, the album's track list (number, title, duration — no album column).
+
+### Lyrics panel (`panels.LyricsView`)
+
+A synced-lyrics panel rides in the RIGHT column, below the main view and above
+the player bar. It is **pure display and never focusable**: it is NOT a
+`focusArea`, the `1`/`2`/`3`/`4` and `h`/`l` controls never reach it, and it
+handles no keys (`focusCount` stays 4 — focus only cycles Library/Playlists/
+Queue/Main).
+
+- **Visibility.** Shown only when a track is playing (`m.hasNow`) AND the top
+  area is tall enough to fit it without starving the main view: the band is a
+  fixed share clamped so the main view always keeps `>= lyricsMainMinH` (8) box
+  rows; below `lyricsBandMin` (6) usable rows the panel is hidden and the main
+  view reclaims them (layout then identical to before). When shown the band is at
+  most `lyricsBandRows` (10) tall. The split is of the right column only, so the
+  rendered view still totals exactly the terminal height with full-width rows at
+  every size (measured with `lipgloss.Height`/`Width`).
+- **Content.** A bordered box (theme inactive border — never active/focused)
+  titled "Lyrics" with a right-aligned state marker (`♪ synced` in Accent /
+  `unsynced` Muted / `no lyrics` Muted; no marker while loading). Synced: a
+  window of lines centered on the current line — current in PlayingStyle,
+  immediate neighbours in Primary, the rest Muted — auto-scrolling as playback
+  advances. Unsynced: the plain text from the top in Primary. Loading:
+  "searching for lyrics…" (Muted). None: "No lyrics found." (Muted). Colours come
+  strictly from theme tokens.
+- **Sync source.** The highlighted line is driven off the SAME playback position
+  the progress bar uses (`m.timePos`, updated by `EvTimePos`), via
+  `lyrics.CurrentLine` — no new event wiring.
+- **Fetch + cache + guard.** On a track change (new videoID) the lyrics state is
+  set to "loading" and a `tea.Cmd` (never blocking `Update`) calls
+  `lyrics.FetchLRCLIB` (8s ctx); on `lyrics.ErrNoLyrics` it falls back to
+  `ytm.Client.Lyrics` (plain text) when the client is non-nil. Resolved results
+  are cached by videoID (`lyricsCache`) so replays/seeks never refetch. A
+  generation guard (`lyricsGen`, like `searchGen`/`albumGen`) drops a late result
+  for a track already moved past; a result still matching the current track is
+  recorded regardless (so a brief switch-away-and-back never sticks on
+  "searching"). nil player / nil client paths never panic. The lookup itself is
+  behind the injectable `lyricsFetch` package var so tests never hit the network.
 
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 

@@ -204,6 +204,13 @@ type Model struct {
 	// tests stub it so no browser or network is touched.
 	reimportFn    reimportFunc
 	reimportTried bool
+
+	// Synced-lyrics panel (pure display, never focusable). Resolved lyrics are
+	// cached by videoID so a replay/seek never refetches; lyricsGen is the
+	// stale-fetch guard (like searchGen/albumGen). The highlighted line is driven
+	// off m.timePos via lyrics.CurrentLine — no extra event wiring.
+	lyricsCache map[string]lyricResult
+	lyricsGen   int
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -227,6 +234,7 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		albumImgCache:    map[string]image.Image{},
 		albumArtCache:    map[string]string{},
 		albumArtInflight: map[string]struct{}{},
+		lyricsCache:      map[string]lyricResult{},
 		volume:           cfg.Volume,
 		hasAuth:          c != nil && c.Authenticated(),
 		reimportFn:       defaultReimport,
@@ -273,15 +281,20 @@ func (m *Model) applySnapshot() {
 }
 
 // Init starts the player-event bridge and, when a track is already playing
-// (attached to a live daemon), kicks off its cover-art fetch.
+// (attached to a live daemon), kicks off its cover-art and lyrics fetches.
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	if m.p != nil {
 		cmds = append(cmds, listenPlayer(m.p))
 	}
-	if m.hasNow && m.nowPlaying.ThumbURL != "" {
-		m.artInflight[m.nowPlaying.VideoID] = struct{}{}
-		cmds = append(cmds, artFetchCmd(m.nowPlaying))
+	if m.hasNow {
+		if m.nowPlaying.ThumbURL != "" {
+			m.artInflight[m.nowPlaying.VideoID] = struct{}{}
+			cmds = append(cmds, artFetchCmd(m.nowPlaying))
+		}
+		// Kick off the lyrics lookup for the already-playing (attached) track.
+		m.lyricsCache[m.nowPlaying.VideoID] = lyricResult{status: lyricLoading}
+		cmds = append(cmds, fetchLyricsCmd(m.c, m.nowPlaying, m.lyricsGen))
 	}
 	// One-shot sign-in check: surfaces the account name (or a stale-cookie
 	// warning) in the logo/status area. No re-check is issued.
@@ -893,6 +906,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, libraryPlaylistsCmd(m.c, m.plGen)
 		}
 		return m, nil
+
+	case lyricsMsg:
+		m.applyLyrics(msg)
+		return m, nil
 	}
 
 	return m, nil
@@ -1442,7 +1459,12 @@ func (m *Model) reflectCurrent(resetTime bool) tea.Cmd {
 		m.timePos = 0
 		m.duration = t.Duration.Seconds()
 	}
-	return m.refreshArt()
+	art := m.refreshArt()
+	if newTrack {
+		// New track: refresh the lyrics panel alongside the cover art.
+		return tea.Batch(art, m.ensureLyrics())
+	}
+	return art
 }
 
 // applyPlaylistPos reconciles the UI's current index with the daemon's
@@ -1804,6 +1826,13 @@ func (m Model) View() string {
 	// player bar (6) + hint line (1) + logo header rows
 	topH := m.height - 7 - logoOff
 
+	// The lyrics panel (when shown) takes a band at the bottom of the RIGHT
+	// column; the main view shrinks to fill the rest. The left column is
+	// unchanged, so the top area still totals topH rows. Hidden when idle or too
+	// short — then mainH == topH and the layout is exactly as before.
+	lyricsH := m.lyricsBandHeight(topH)
+	mainH := topH - lyricsH
+
 	libH := len(m.libItems) + 2
 	rem := topH - libH
 	if rem < 6 {
@@ -1827,14 +1856,23 @@ func (m Model) View() string {
 	switch top.kind {
 	case mainAlbum:
 		cover := m.albumCoverBlock(top.album)
-		mainBox = panels.AlbumView(m.th, "4 "+top.title, top.album, top.tracks, top.cursor, cover, playingID, mainW, topH, mainFocused)
+		mainBox = panels.AlbumView(m.th, "4 "+top.title, top.album, top.tracks, top.cursor, cover, playingID, mainW, mainH, mainFocused)
 	case mainSearch:
-		mainBox = panels.SearchView(m.th, "4 "+top.title, top.tracks, top.albums, top.cursor, playingID, mainW, topH, mainFocused)
+		mainBox = panels.SearchView(m.th, "4 "+top.title, top.tracks, top.albums, top.cursor, playingID, mainW, mainH, mainFocused)
 	default:
-		mainBox = panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, topH, mainFocused)
+		mainBox = panels.MainView(m.th, "4 "+top.title, top.tracks, top.cursor, playingID, mainW, mainH, mainFocused)
 	}
 
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, mainBox)
+	// The non-focusable lyrics panel rides below the main view, above the player
+	// bar, within the right column.
+	rightCol := mainBox
+	if lyricsH > 0 {
+		st, lines, plain, cur := m.lyricsForView()
+		lyricsBox := panels.LyricsView(m.th, st, lines, plain, cur, mainW, lyricsH)
+		rightCol = lipgloss.JoinVertical(lipgloss.Left, mainBox, lyricsBox)
+	}
+
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, rightCol)
 	bar := panels.PlayerBar(m.th, m.playerState(), m.artBlock, m.width)
 	hint := m.statusRow(logo != "", ind)
 

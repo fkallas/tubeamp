@@ -27,9 +27,9 @@ a playlist loads its tracks (first page, ~100 tracks each; radio not yet). An
 **anonymous** session keeps the demo/mock library and toasts a sign-in hint. The
 remaining Library sections (Albums/Artists/Songs/History) are still mock.
 
-Time-synced lyrics are plumbed in as a building block (`internal/lyrics`): LRC
-fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube Music
-plain-text fallback (`ytm.Client.Lyrics`). Not yet surfaced in the UI.
+Time-synced lyrics are surfaced in a panel below the main view while a track
+plays: LRC fetching/parsing from [LRCLIB](https://lrclib.net) with a YouTube
+Music plain-text fallback. See [Lyrics](#lyrics).
 
 Note: the InnerTube **album-search vertical** ranks oddly — it surfaces obscure
 self-distributed releases over the major-label catalog. This is **not** an auth
@@ -72,6 +72,23 @@ Search returns two sections — Songs and Albums. On an album row, `enter` plays
 whole album and `o` opens an album view (cover, metadata, track list) where `enter`
 plays the album from the highlighted track and `esc` returns to the results. `o` on
 a song row opens that song's album view too.
+
+## Lyrics
+
+While a track is playing, a synced-lyrics panel appears in the right column,
+below the main view and above the player bar. It is **display only** — you cannot
+focus it and it consumes no keys; `1`/`2`/`3`/`4` and `h`/`l` still cycle only the
+four panels.
+
+- **Synced** lyrics (LRC) scroll automatically, with the current line highlighted
+  and its neighbours dimmed, in step with playback (the panel marks itself
+  `♪ synced`). Lyrics come from [LRCLIB](https://lrclib.net); when LRCLIB has no
+  synced lyrics, tubeamp falls back to YouTube Music's **plain** (unsynced) text
+  (`unsynced`). When nothing is found the panel shows "No lyrics found.".
+- Lyrics are fetched in the background on each track change and cached per track,
+  so replays and seeks never refetch. The panel hides automatically when nothing
+  is playing or the terminal is too short to show it without crowding the main
+  view.
 
 ## Gapless playback
 
