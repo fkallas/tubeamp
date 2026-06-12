@@ -406,9 +406,28 @@ real library lands.
 
 ## cmd/tubeamp
 
-`main.go`: parse flags (`-theme <name>` override, `-version`); `config.Load`;
-`theme.Load` (fall back to `theme.Default()` with a warning); `player.New`
-(attach-or-spawn; on error: nil player, app shows degraded notice);
-`ytm.LoadAuth(DataDir()/auth)` (missing file → nil auth) + `ytm.NewClient`;
+`main.go`: parse flags; `config.Load`. With no control flag set it runs the TUI:
+`-theme <name>` override, `-version`; `theme.Load` (fall back to `theme.Default()`
+with a warning); `player.New` (attach-or-spawn; on error nil player + degraded
+notice); `ytm.LoadAuth(DataDir()/auth)` (missing → nil auth) + `ytm.NewClient`;
 `core.NewQueue`; `ui.New`; `tea.NewProgram(..., tea.WithAltScreen())`. On exit:
 `player.Close()` — a DETACH, so mpv keeps playing in the background.
+
+`control.go`: when any one-shot control flag is set, `dispatchControl` drives the
+running daemon instead of opening the TUI. All use `player.New` with
+`AttachOnly`; when no daemon is running they print `tubeamp: not running` to
+stderr and exit 1 — **except `-line`, which stays silent and exits 0** so it can
+feed tmux/status scripts.
+
+| Flag        | Action                                                                 |
+|-------------|------------------------------------------------------------------------|
+| `-p`        | toggle pause                                                           |
+| `-next`     | skip to next track (`playlist-next`)                                   |
+| `-prev`     | skip to previous track (`playlist-prev`)                               |
+| `-stop`     | stop playback                                                         |
+| `-vol N`    | set volume: `N` absolute, `+N`/`-N` relative                          |
+| `-seek S`   | seek `±S` seconds (relative)                                          |
+| `-status`   | multi-line human-readable status (glyph, title, artists, album, pos/dur, volume, track n/m) |
+| `-line`     | one compact line `♪ Title — Artist 1:23/3:54` (~48 cols); empty when idle or no daemon |
+| `-queue`    | numbered queue, playing row marked `▶`                               |
+| `-kill`     | `player.Quit()` the daemon (removes socket + lock)                    |

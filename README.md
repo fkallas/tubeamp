@@ -52,6 +52,29 @@ each entry is resolved on demand, the prefetch happens a moment before the
 hand-off rather than far ahead; expect tight, near-gapless transitions rather than
 sample-accurate ones for streamed sources.
 
+## Controlling playback
+
+`tubeamp` with no arguments opens the TUI. With a control flag it instead talks
+to the running background daemon and exits — handy for global keybindings and
+tmux/status-bar integrations. If no daemon is running these print
+`tubeamp: not running` and exit 1 (except `-line`, which stays silent so an empty
+status cell is shown).
+
+| Command            | Effect                                                          |
+|--------------------|-----------------------------------------------------------------|
+| `tubeamp -p`       | toggle pause                                                    |
+| `tubeamp -next`    | skip to the next track                                          |
+| `tubeamp -prev`    | skip to the previous track                                      |
+| `tubeamp -stop`    | stop playback                                                   |
+| `tubeamp -vol N`   | set volume — `N` absolute, `+N`/`-N` relative (e.g. `-vol +5`)  |
+| `tubeamp -seek S`  | seek `±S` seconds (e.g. `-seek -10`)                            |
+| `tubeamp -status`  | human-readable status (title, artists, album, position, volume)|
+| `tubeamp -line`    | one compact line `♪ Title — Artist 1:23/3:54`; empty when idle  |
+| `tubeamp -queue`   | the numbered queue, playing row marked `▶`                      |
+| `tubeamp -kill`    | quit the background daemon entirely                             |
+
+Example tmux status line: `set -g status-right '#(tubeamp -line)'`.
+
 ## Themes
 
 Built-ins: catppuccin-mocha, catppuccin-latte, gruvbox-dark, nord, dracula,

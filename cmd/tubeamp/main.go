@@ -31,6 +31,19 @@ var version = "0.1.0"
 func main() {
 	themeFlag := flag.String("theme", "", "theme name to use (overrides config)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
+
+	// One-shot control flags: when any is set, drive the running daemon instead
+	// of opening the TUI. They attach only and never spawn mpv.
+	pauseFlag := flag.Bool("p", false, "toggle pause on the running daemon")
+	nextFlag := flag.Bool("next", false, "skip to the next track")
+	prevFlag := flag.Bool("prev", false, "skip to the previous track")
+	stopFlag := flag.Bool("stop", false, "stop playback")
+	statusFlag := flag.Bool("status", false, "print human-readable playback status")
+	lineFlag := flag.Bool("line", false, "print one compact status line (empty when idle)")
+	queueFlag := flag.Bool("queue", false, "print the numbered queue")
+	killFlag := flag.Bool("kill", false, "quit the background mpv daemon")
+	volFlag := flag.String("vol", "", "set volume: N, +N, or -N")
+	seekFlag := flag.String("seek", "", "seek by ±SECONDS (relative)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -38,21 +51,32 @@ func main() {
 		return
 	}
 
-	if err := run(*themeFlag); err != nil {
+	// Configuration: a missing file yields defaults, not an error.
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tubeamp:", err)
+		os.Exit(1)
+	}
+
+	cf := controlFlags{
+		pause: *pauseFlag, next: *nextFlag, prev: *prevFlag, stop: *stopFlag,
+		status: *statusFlag, line: *lineFlag, queue: *queueFlag, kill: *killFlag,
+		vol: *volFlag, seek: *seekFlag,
+	}
+	if cf.any() {
+		os.Exit(dispatchControl(os.Stdout, os.Stderr, cfg, cf))
+	}
+
+	if err := run(cfg, *themeFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "tubeamp:", err)
 		os.Exit(1)
 	}
 }
 
 // run builds the application graph and runs the UI. Optional subsystems degrade
-// to nil rather than aborting; mpv is always closed before returning.
-func run(themeOverride string) error {
-	// Configuration: a missing file yields defaults, not an error.
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
+// to nil rather than aborting. On exit the player is detached (Close), NOT
+// killed — mpv keeps playing in the background so playback survives the TUI.
+func run(cfg *config.Config, themeOverride string) error {
 	// Theme: -theme overrides the configured theme; on any load failure we fall
 	// back to the built-in default with a warning.
 	themeName := cfg.Theme
@@ -67,8 +91,9 @@ func run(themeOverride string) error {
 		cfg.Theme = th.Name
 	}
 
-	// Player: if mpv is missing or never connects, run with a nil player; the UI
-	// surfaces a "playback disabled" notice on its status line.
+	// Player: attach to a running daemon or spawn a detached one. If mpv is
+	// missing or never connects, run with a nil player; the UI surfaces a
+	// "playback disabled" notice on its status line.
 	var p *player.Player
 	if pl, perr := player.New(player.Options{
 		MPVPath:    cfg.MPVPath,
@@ -77,7 +102,7 @@ func run(themeOverride string) error {
 	}); perr == nil {
 		p = pl
 	}
-	// Always shut mpv down on the way out, including error paths below.
+	// Detach (not kill) on the way out so playback continues in the background.
 	if p != nil {
 		defer p.Close()
 	}
