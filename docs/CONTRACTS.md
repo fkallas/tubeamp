@@ -292,6 +292,12 @@ Left column ~30% width (min 24, max 40 cols). Library panel fixed-height
 Focused panel gets BorderActive + active Title. Handle `tea.WindowSizeMsg`
 everywhere; below ~70×20 show a centered "terminal too small" notice.
 
+Main-view track table columns: TITLE, ARTIST, ALBUM (Muted), then duration
+flushed right. The ALBUM column is dropped when the main view is narrower than
+~80 cols; when space is tight columns truncate in priority order
+TITLE > ARTIST > ALBUM. Queue rows append a Muted " — <album>" suffix only when
+the Queue panel is ~34 cols or wider; otherwise the row is unchanged.
+
 ### Keymap (package keymap, bubbles/key bindings; this is the spec reviewers check)
 
 Global: `1` focus Library; `2` focus Playlists; `3` focus Queue; `4` focus Main

@@ -70,6 +70,22 @@ func PadPlain(s string, w int) string {
 	return Clip(s, w)
 }
 
+// padLeft right-aligns s within w display columns by prefixing spaces, or clips
+// it (keeping the tail visible) when it is wider.
+func padLeft(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	cur := lipgloss.Width(s)
+	if cur == w {
+		return s
+	}
+	if cur < w {
+		return strings.Repeat(" ", w-cur) + s
+	}
+	return Clip(s, w)
+}
+
 // Box renders body inside a rounded border of exactly w×h cells, with title
 // embedded in the top border like Lazygit. When active the border uses the
 // theme's active border colour and the title its active (accent) colour.
@@ -117,6 +133,12 @@ type rowOpts struct {
 	focused    bool // the owning panel currently has focus
 	playing    bool // this row is the playing track (show the note marker)
 	showMarker bool // reserve a marker column (queue + main view)
+	// styledField, when non-empty, is a pre-styled rendering of the label used
+	// for non-selected rows so a single row can mix theme styles (e.g. a muted
+	// album column). It MUST have a display width of exactly innerW-2-markerW so
+	// the row still aligns. Selected rows ignore it and render the plain label
+	// solid in the selection style.
+	styledField string
 }
 
 // renderListRow renders one list row to exactly innerW columns: a "> " cursor
@@ -154,14 +176,18 @@ func renderListRow(th *theme.Theme, label string, innerW int, o rowOpts) string 
 		return st.Render(cursor + marker + field)
 	}
 
+	body := o.styledField
+	if body == "" {
+		body = th.Primary().Render(field)
+	}
 	if o.showMarker && o.playing {
-		return cursor + th.PlayingStyle().Render(noteGlyph+" ") + th.Primary().Render(field)
+		return cursor + th.PlayingStyle().Render(noteGlyph+" ") + body
 	}
 	marker := ""
 	if o.showMarker {
 		marker = "  "
 	}
-	return cursor + marker + th.Primary().Render(field)
+	return cursor + marker + body
 }
 
 // visibleWindow returns the [start, end) slice bounds of a list of total items

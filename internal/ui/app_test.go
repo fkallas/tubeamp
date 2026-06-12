@@ -264,3 +264,28 @@ func TestLogoHiddenAtSmallTerminal(t *testing.T) {
 		t.Errorf("View(120×22) should hide the logo; \"tubeamp\" unexpectedly found")
 	}
 }
+
+// TestAlbumColumnVisibleAtWideWidth asserts the main-view track table shows the
+// ALBUM column when the main view is wide enough (terminal 120 → main view ~84
+// cols). "Nevermind" is a mock album short enough to fit the album column.
+func TestAlbumColumnVisibleAtWideWidth(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "Nevermind") {
+		t.Errorf("View(120×40) should show the album column; \"Nevermind\" not found in:\n%s", v)
+	}
+}
+
+// TestAlbumColumnHiddenAtNarrowWidth asserts the ALBUM column is dropped when the
+// main view is narrower than ~80 cols (terminal 80 → main view ~56 cols), while
+// the track row itself (its title) is still listed.
+func TestAlbumColumnHiddenAtNarrowWidth(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	v := ansi.Strip(m.View())
+	if strings.Contains(v, "Nevermind") {
+		t.Errorf("View(80×24) should hide the album column; \"Nevermind\" unexpectedly present")
+	}
+	if !strings.Contains(v, "Smells Like Teen Spirit") {
+		t.Errorf("View(80×24) dropped the track row; \"Smells Like Teen Spirit\" missing")
+	}
+}

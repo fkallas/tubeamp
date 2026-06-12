@@ -6,6 +6,9 @@ Stacked, numbered panels on the left (Library / Playlists / Queue), a contextual
 main view on the right, a persistent player bar with pixel-art album covers, and
 number-key panel switching with arrow-key navigation. Themeable via simple YAML files.
 
+The main view lists tracks as a table — title, artist, album, and duration —
+with the album column hidden automatically on narrow terminals.
+
 ## Status
 
 Early scaffold. The TUI shell, theming, mpv playback pipeline, and pixel-art
