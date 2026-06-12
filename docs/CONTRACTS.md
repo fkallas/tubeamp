@@ -510,6 +510,55 @@ playlist-shelf), each with one malformed item skipped. `lyrics_next.json` /
 `lyrics_browse.json` are a handcrafted next+browse pair exercising the two-call
 lyrics flow (a "Lyrics" tab with an MPLYt browseId, then a description shelf).
 
+## internal/ytdata
+
+YouTube **Data API v3** client for the signed-in user's library, driven by the
+OAuth token. Google's private InnerTube API rejects OAuth bearer tokens, but the
+official Data API (`https://www.googleapis.com/youtube/v3`) accepts the same
+token and returns the user's real playlists and liked videos — so OAuth is for
+the Data API only; InnerTube auth stays cookie/anonymous. Plain HTTPS GET + JSON
+over `net/http`/`encoding/json` (no new dependency). 10s HTTP client,
+`io.LimitReader` on bodies. Each request adds `Authorization: Bearer <access>`;
+before a request the access token is refreshed (serialized by a mutex) and
+persisted (best-effort, 0600) when expired. Non-2xx => error with status + a
+truncated body.
+
+```go
+// package ytdata
+type Client struct{ ... }
+// NewClient holds the OAuth token + creds + token path. tokenPath "" => the
+// refreshed token is kept in memory only (no persist). tok must be non-nil.
+func NewClient(tok *ytm.OAuthToken, creds ytm.OAuthCreds, tokenPath string) *Client
+
+func (c *Client) Account(ctx context.Context) (name string, err error)
+                                       // channels?part=snippet&mine=true ->
+                                       // items[0].snippet.title. Empty items =>
+                                       // ("", nil); HTTP error => err.
+func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
+                                       // playlists?part=snippet,contentDetails&mine=true
+                                       // &maxResults=50, follows nextPageToken to a
+                                       // ~200 cap. id->ID, title->Title,
+                                       // contentDetails.itemCount->TrackCount.
+func (c *Client) PlaylistTracks(ctx context.Context, playlistID string) ([]model.Track, error)
+                                       // playlistItems?part=snippet,contentDetails
+                                       // &playlistId=<id>&maxResults=50, first ~2
+                                       // pages / ~100 tracks (TODO: full pagination).
+                                       // mapVideo per item; items with no videoId
+                                       // (deleted/private) are skipped.
+func (c *Client) LikedSongs(ctx context.Context) ([]model.Track, error)
+                                       // PlaylistTracks against playlistId="LL".
+```
+
+`mapVideo` maps a playlistItems snippet+contentDetails to a `model.Track`:
+`VideoID` = contentDetails.videoId; when `videoOwnerChannelTitle` (fallback
+`channelTitle`) ends with `" - Topic"` the artist is that minus the suffix and
+`Title` = snippet.title; otherwise `Artists` = [channelTitle]. `Album`/`AlbumID`
+stay "" (the Data API does not expose album) and `Duration` is 0 (NOTE: a
+`videos?part=contentDetails` batch could fill durations later). `ThumbURL` is the
+largest of snippet.thumbnails (by area, falling back to a high/medium preference
+order). The OAuth token refresh reuses `ytm.OAuthToken.Refresh`; the client wraps
+it behind an injectable seam so tests drive it against an httptest token endpoint.
+
 ## internal/lyrics
 
 Fetching and parsing of song lyrics — synced (LRC, from LRCLIB) and plain. Pure
