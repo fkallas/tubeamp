@@ -1018,6 +1018,15 @@ func waitProcessGone(pid int, timeout time.Duration) bool {
 // Snapshot, then Quits and verifies the process and socket are gone. Skipped
 // when mpv is absent. Kept hermetic by pointing HOME/XDG at temp dirs.
 func TestPersistentDaemonRealMPV(t *testing.T) {
+	// This is a real-mpv INTEGRATION test: it spawns mpv and depends on a
+	// working real-time audio output to play silence WAVs and auto-advance. That
+	// makes it environment-fragile (no/locked/changed audio device → no
+	// playback progress → no auto-advance), so it is gated like the other live
+	// tests. The fake-mpv tests above cover the playlist/auto-advance logic
+	// deterministically. Run on demand: TUBEAMP_LIVE_MPV=1 go test ./internal/player/
+	if os.Getenv("TUBEAMP_LIVE_MPV") != "1" {
+		t.Skip("real-mpv integration test; set TUBEAMP_LIVE_MPV=1 (needs a working audio output)")
+	}
 	if _, err := exec.LookPath("mpv"); err != nil {
 		t.Skip("mpv not installed")
 	}
@@ -1043,6 +1052,13 @@ func TestPersistentDaemonRealMPV(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("a spawned player must record its mpv pid")
 	}
+	// Detach semantics mean Close() leaves mpv running; if the test fails before
+	// its Quit() step the daemon would leak. Guarantee teardown on every path.
+	t.Cleanup(func() {
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
 
 	ta := model.Track{VideoID: "a", Title: "Track A", Duration: 400 * time.Millisecond}
 	tb := model.Track{VideoID: "b", Title: "Track B", Duration: 400 * time.Millisecond}
