@@ -19,7 +19,9 @@ it in your report — do not silently deviate.
 - Allowed deps: stdlib, `github.com/charmbracelet/bubbletea` (**v1 API**:
   `Init() tea.Cmd`, `Update(tea.Msg) (tea.Model, tea.Cmd)`, `View() string`),
   `github.com/charmbracelet/lipgloss`, `github.com/charmbracelet/bubbles/key`,
-  `github.com/charmbracelet/bubbles/textinput`, `gopkg.in/yaml.v3`.
+  `github.com/charmbracelet/bubbles/textinput`,
+  `github.com/charmbracelet/x/ansi` (ANSI-aware splicing in the overlay
+  compositor; already in the module graph via lipgloss), `gopkg.in/yaml.v3`.
 - Compile and test your own package before finishing:
   `go build ./internal/<pkg>/...` and `go test ./internal/<pkg>/...`.
   Run `gofmt -w` on your files.
@@ -401,9 +403,12 @@ queue with the album from track 0 and plays ("Playing <album>" toast); `o` fetch
 `GetAlbum` then pushes a dedicated **album view** onto the main-view stack. In the
 **album view**: `↑`/`↓` move; `enter` = `PlaylistReplace(albumTracks, selected)` +
 play (the whole album, starting at the selected track); `esc` pops back to the
-search results with the cursor preserved. GetAlbum and the album-cover download
-each carry a generation guard (like the search guard) so stale results are dropped;
-nil-player / nil-client are handled with status-line notices, never a crash.
+search results with the cursor preserved. GetAlbum carries a generation guard
+(like the search guard — invalidated by a newer fetch, by `esc`, and by replacing
+the main view) so a stale album page is dropped; album covers need no guard —
+they are content-addressed by browseID and cached on arrival, so a late download
+is never wrong. nil-player / nil-client are handled with status-line notices,
+never a crash.
 
 ### Required patterns
 

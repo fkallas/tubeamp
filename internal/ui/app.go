@@ -110,11 +110,11 @@ type Model struct {
 	// has since superseded or navigated away from) never steals the view/focus.
 	searchGen int
 
-	// albumGen / coverGen are the search-style stale guards for the two album
-	// fetches: GetAlbum (album page) and the album cover download. A late result
-	// whose generation no longer matches is discarded.
+	// albumGen is the search-style stale guard for GetAlbum fetches: a late
+	// result is discarded when a newer fetch was issued or the user navigated
+	// away (esc / replacing the main view). Album covers need no generation —
+	// they are content-addressed by browseID and cached on arrival.
 	albumGen int
-	coverGen int
 
 	// Overlays.
 	overlay   overlayKind
@@ -284,7 +284,6 @@ type albumLoadMsg struct {
 
 // albumCoverMsg carries a downloaded album cover image for the album view.
 type albumCoverMsg struct {
-	gen      int
 	browseID string
 	img      image.Image
 	err      error
@@ -427,13 +426,13 @@ func albumGetCmd(c *ytm.Client, browseID, title string, open bool, gen int) tea.
 
 // albumCoverCmd downloads (only) the album cover at px×px; rendering happens back
 // in Update so a theme change re-renders locally without re-downloading.
-func albumCoverCmd(browseID, thumbURL string, gen int) tea.Cmd {
+func albumCoverCmd(browseID, thumbURL string) tea.Cmd {
 	url := art.RewriteThumbURL(thumbURL, 64)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		img, err := art.Fetch(ctx, url)
-		return albumCoverMsg{gen: gen, browseID: browseID, img: img, err: err}
+		return albumCoverMsg{browseID: browseID, img: img, err: err}
 	}
 }
 
@@ -566,12 +565,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case albumCoverMsg:
 		delete(m.albumArtInflight, msg.browseID)
-		if msg.gen != m.coverGen {
-			return m, nil // stale cover for a superseded album view
-		}
 		if msg.err != nil || msg.img == nil {
 			return m, nil // keep the placeholder
 		}
+		// Covers are content-addressed by browseID, so a late arrival is never
+		// wrong: always cache it (decoded image + render for the current theme)
+		// and let whichever view shows this album pick it up — including one
+		// re-opened while the deduped fetch was still in flight.
 		m.albumImgCache[msg.browseID] = msg.img
 		m.albumArtCache[msg.browseID+"|"+m.th.Name] = art.Render(msg.img, panels.AlbumCoverCols, panels.AlbumCoverRows, art.Options{Palette: m.th.Palette()})
 		return m, nil
@@ -669,6 +669,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if popped.kind == mainSearch {
 				m.searchGen++
 			}
+			// Navigating back also invalidates any in-flight GetAlbum, so a
+			// late album page can neither hijack the queue (enter on an album
+			// row) nor push its view over the wrong context ('o').
+			m.albumGen++
 		}
 
 	case key.Matches(msg, k.Up):
@@ -1141,11 +1145,12 @@ func (m *Model) removeFromQueue() tea.Cmd {
 }
 
 // setMain replaces the main-view stack with a single content frame. It also
-// invalidates any in-flight search so a late result cannot replace the view the
-// user just navigated to.
+// invalidates any in-flight search and album fetch so a late result cannot
+// replace or cover the view the user just navigated to.
 func (m *Model) setMain(title string, tracks []model.Track) {
 	m.stack = []mainContent{{title: title, tracks: tracks}}
 	m.searchGen++
+	m.albumGen++
 }
 
 // pushMain pushes a new track-list content frame onto the main-view stack.
@@ -1156,11 +1161,14 @@ func (m *Model) pushMain(title string, tracks []model.Track) {
 // ensureSearchFrame returns the search-results frame for the current search
 // generation, pushing a fresh one (and focusing the main view) the first time a
 // result for this generation arrives. Songs and albums arrive separately and
-// share a generation, so the second result updates the same frame.
+// share a generation, so the second result updates the same frame — which may
+// no longer be on top (e.g. the user already opened an album view from the
+// section that arrived first), so the whole stack is searched rather than just
+// the top; a late result must never push a duplicate frame or steal focus.
 func (m *Model) ensureSearchFrame(query string) *mainContent {
-	if n := len(m.stack); n > 0 {
-		if top := &m.stack[n-1]; top.kind == mainSearch && top.searchGen == m.searchGen {
-			return top
+	for i := range m.stack {
+		if fr := &m.stack[i]; fr.kind == mainSearch && fr.searchGen == m.searchGen {
+			return fr
 		}
 	}
 	m.stack = append(m.stack, mainContent{
@@ -1215,8 +1223,7 @@ func (m *Model) ensureAlbumCover(a model.Album) tea.Cmd {
 		return nil
 	}
 	m.albumArtInflight[a.BrowseID] = struct{}{}
-	m.coverGen++
-	return albumCoverCmd(a.BrowseID, a.ThumbURL, m.coverGen)
+	return albumCoverCmd(a.BrowseID, a.ThumbURL)
 }
 
 // refreshAlbumCover re-renders the open album view's cover for the current theme

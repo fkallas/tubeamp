@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image"
 	"strings"
 	"testing"
 	"time"
@@ -347,6 +348,110 @@ func TestAlbumViewEnterWithNilPlayerToasts(t *testing.T) {
 	}
 	if m.q.Len() != len(ts) {
 		t.Errorf("album-view enter should queue all %d tracks, got %d", len(ts), m.q.Len())
+	}
+}
+
+// TestLateSearchResultUpdatesBuriedSearchFrame covers songs and albums arriving
+// as separate messages: when the user has already opened an album view from the
+// section that arrived first, the late result must update the original search
+// frame in place — never push a duplicate frame over the album view or steal
+// the top of the stack.
+func TestLateSearchResultUpdatesBuriedSearchFrame(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+
+	m.searchGen = 7
+	m = send(m, albumSearchMsg{gen: 7, query: "x", albums: []model.Album{a}}) // search frame pushed
+	m.pushAlbum(a, ts)                                                        // user opened the album ('o' flow)
+	if len(m.stack) != 3 {
+		t.Fatalf("setup: stack depth = %d, want 3", len(m.stack))
+	}
+
+	m = send(m, searchResultMsg{gen: 7, query: "x", tracks: ts}) // late songs result
+	if len(m.stack) != 3 {
+		t.Fatalf("late songs result changed stack depth to %d, want 3 (no duplicate search frame)", len(m.stack))
+	}
+	if top := m.stack[len(m.stack)-1]; top.kind != mainAlbum {
+		t.Errorf("top frame kind = %v, want the album view to stay on top", top.kind)
+	}
+	if got := len(m.stack[1].tracks); got != len(ts) {
+		t.Errorf("buried search frame got %d tracks, want %d", got, len(ts))
+	}
+}
+
+// TestEscInvalidatesPendingAlbumLoad asserts navigating back drops an in-flight
+// GetAlbum: a late result must neither push an album view over the new context
+// nor silently replace the playback queue.
+func TestEscInvalidatesPendingAlbumLoad(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+
+	m.searchGen = 1
+	m = send(m, albumSearchMsg{gen: 1, query: "x", albums: []model.Album{a}})
+	m.albumGen = 3 // a GetAlbum (enter/'o' on the album row) is in flight
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyEsc}) // back to the previous frame
+	depth := len(m.stack)
+
+	m = send(m, albumLoadMsg{gen: 3, open: true, album: a, tracks: ts})
+	if len(m.stack) != depth {
+		t.Errorf("stale album load pushed a view: depth %d -> %d", depth, len(m.stack))
+	}
+	m = send(m, albumLoadMsg{gen: 3, open: false, album: a, tracks: ts})
+	if m.q.Len() != 0 {
+		t.Errorf("stale album load replaced the queue with %d tracks", m.q.Len())
+	}
+}
+
+// TestLateAlbumCoverIsCached pins the album-cover policy: covers are
+// content-addressed by browseID, so an arriving download is always cached
+// (decoded + rendered for the current theme) — even when it lands "late", e.g.
+// for a view that was closed and re-opened while the deduped fetch was still in
+// flight. Before the fix a generation guard discarded such covers entirely,
+// leaving the open view stuck on the placeholder.
+func TestLateAlbumCoverIsCached(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	a, ts := fakeAlbum()
+	m.pushAlbum(a, ts)
+
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	m = send(m, albumCoverMsg{browseID: a.BrowseID, img: img})
+
+	if _, ok := m.albumImgCache[a.BrowseID]; !ok {
+		t.Error("decoded cover not cached by browseID")
+	}
+	if _, ok := m.albumArtCache[a.BrowseID+"|"+m.th.Name]; !ok {
+		t.Error("rendered cover not cached for the current theme")
+	}
+}
+
+// TestLogoVisibilityBoundary pins the logo's height boundary: visible at
+// exactly logoMinTermHeight (24), hidden one row below (23) — and in both
+// modes the rendered view still totals exactly the terminal height with
+// full-width rows (the 2 logo rows are reclaimed by the panel area).
+func TestLogoVisibilityBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		h       int
+		visible bool
+	}{
+		{logoMinTermHeight, true},      // 24: first height that shows the logo
+		{logoMinTermHeight - 1, false}, // 23: last height that hides it
+	} {
+		m := newTestModel(t, 120, tc.h)
+		raw := m.View()
+		if got := strings.Contains(ansi.Strip(raw), "tubeamp"); got != tc.visible {
+			t.Errorf("h=%d: logo visible = %v, want %v", tc.h, got, tc.visible)
+		}
+		lines := strings.Split(raw, "\n")
+		if len(lines) != tc.h {
+			t.Errorf("h=%d: view has %d rows, want exactly %d", tc.h, len(lines), tc.h)
+		}
+		for i, ln := range lines {
+			if got := lipgloss.Width(ln); got != 120 {
+				t.Errorf("h=%d: line %d width = %d, want 120", tc.h, i, got)
+				break
+			}
+		}
 	}
 }
 
