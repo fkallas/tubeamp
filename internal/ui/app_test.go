@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fkallas/tubeamp/internal/config"
 	"github.com/fkallas/tubeamp/internal/core"
@@ -83,6 +84,63 @@ func TestHelpOverlayOpensAndCloses(t *testing.T) {
 	m = send(m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.overlay != overlayNone {
 		t.Errorf("esc did not close help overlay; overlay = %v", m.overlay)
+	}
+}
+
+// TestHelpOverlayDoesNotBlankBackground is the regression test for the overlay
+// compositor: opening the help overlay must splice the modal box over the view
+// without blanking the rows it sits on. Before the fix, whole rows under the box
+// were overwritten with spaces; now the background survives on BOTH sides.
+func TestHelpOverlayDoesNotBlankBackground(t *testing.T) {
+	m := newTestModel(t, 120, 40)
+	base := strings.Split(ansi.Strip(m.View()), "\n")
+	mo := send(m, runes("?"))
+	over := strings.Split(ansi.Strip(mo.View()), "\n")
+
+	if len(base) != len(over) {
+		t.Fatalf("overlay changed row count: base %d, overlay %d", len(base), len(over))
+	}
+	// The left-column header must still be present somewhere in the overlay view.
+	if !strings.Contains(strings.Join(over, "\n"), "1 Library") {
+		t.Fatalf("help overlay blanked the left column (\"1 Library\" gone)")
+	}
+	// Column 0 is the outer frame border on every framed row. The bug blanked it
+	// to a space on the modal's rows; assert it survived verbatim on every row.
+	for i := range base {
+		br, or := []rune(base[i]), []rune(over[i])
+		if len(br) == 0 || len(or) == 0 {
+			continue
+		}
+		if br[0] != or[0] {
+			t.Errorf("row %d column 0 changed under overlay: base %q overlay %q", i, base[i], over[i])
+		}
+	}
+	// On a row the modal actually covers, the background to the LEFT of the box
+	// must be preserved (the panel content "left of the box is still visible in
+	// the same row as overlay content"). The longest common prefix between the
+	// base and overlay rows is exactly that preserved left segment; the bug
+	// reduced it to nothing.
+	var diffRows []int
+	for i := range base {
+		if base[i] != over[i] {
+			diffRows = append(diffRows, i)
+		}
+	}
+	if len(diffRows) == 0 {
+		t.Fatal("opening the overlay produced no visible change")
+	}
+	r := diffRows[len(diffRows)/2] // a row through the middle of the modal
+	br, or := []rune(base[r]), []rune(over[r])
+	lcp := 0
+	for lcp < len(br) && lcp < len(or) && br[lcp] == or[lcp] {
+		lcp++
+	}
+	if strings.TrimSpace(string(br[:lcp])) == "" {
+		t.Fatalf("row %d: overlay blanked the background left of the box\nbase: %q\nover: %q",
+			r, base[r], over[r])
+	}
+	if !strings.Contains(string(br[:lcp]), "│") {
+		t.Errorf("row %d: preserved left segment has no left-column border: %q", r, string(br[:lcp]))
 	}
 }
 

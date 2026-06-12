@@ -844,7 +844,7 @@ func (m Model) View() string {
 	base := lipgloss.JoinVertical(lipgloss.Left, topRow, bar, hint)
 
 	if m.overlay != overlayNone {
-		return overlayCenter(base, m.renderOverlay(), m.width, m.height)
+		return CompositeCenter(m.renderOverlay(), base)
 	}
 	return base
 }
@@ -923,33 +923,6 @@ func (m Model) contextHints() []hint {
 		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Append.Help().Key, "queue"},
 			{k.InsertNext.Help().Key, "play next"}, {k.Search.Help().Key, "search"}, {k.Help.Help().Key, "help"}}
 	}
-}
-
-// overlayCenter composites modal centered over base, clearing the rows the
-// modal occupies (a simple "render over it" with no true dimming).
-func overlayCenter(base, modal string, w, h int) string {
-	baseLines := strings.Split(base, "\n")
-	modalLines := strings.Split(modal, "\n")
-	mh := len(modalLines)
-	mw := lipgloss.Width(modal)
-
-	top := (h - mh) / 2
-	if top < 0 {
-		top = 0
-	}
-	left := (w - mw) / 2
-	if left < 0 {
-		left = 0
-	}
-	pad := strings.Repeat(" ", left)
-	for i, ml := range modalLines {
-		row := top + i
-		if row < 0 || row >= len(baseLines) {
-			continue
-		}
-		baseLines[row] = panels.PadPlain(pad+ml, w)
-	}
-	return strings.Join(baseLines, "\n")
 }
 
 func clamp(v, lo, hi int) int {

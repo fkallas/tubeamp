@@ -1,7 +1,7 @@
 // Package overlay implements tubeamp's modal overlays (help, search, theme
-// picker). Each overlay renders a centered, rounded-border box using the active
-// theme; the root model composites it over the dimmed background and routes all
-// keys to the open overlay until esc closes it.
+// picker). Each overlay renders a rounded-border box using the active theme; the
+// root model composites it (centered, ANSI-aware) over the rendered app view via
+// ui.CompositeCenter and routes all keys to the open overlay until esc closes it.
 package overlay
 
 import (

@@ -251,6 +251,16 @@ comment.
 func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q *core.Queue) Model
 // Model implements tea.Model (v1). Run with tea.NewProgram(m, tea.WithAltScreen()).
 // p and c may each be nil => degraded mode (status-line notice instead of crash).
+
+// ANSI-aware overlay compositor (compose.go). Splices an overlay box over the
+// fully-rendered app view WITHOUT blanking the rows it sits on: for each overlay
+// row it keeps background columns [0,x), drops in the overlay row, then keeps
+// background columns [x+w,…). SGR state on both sides is cut/restored so styles
+// never bleed across the seams; a wide rune bisected by a seam becomes a space.
+// Overlays wider/taller than the background are clamped; a row shorter than x is
+// space-padded. View composites help/search/theme overlays via CompositeCenter.
+func Composite(overlay, background string, x, y int) string
+func CompositeCenter(overlay, background string) string
 ```
 
 ### Layout
