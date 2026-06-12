@@ -202,6 +202,12 @@ access token whenever the old one expires, with no action from you. On startup,
 if `oauth.json` exists and the client credentials are configured, tubeamp uses
 OAuth in preference to the cookie auth file. `-logout` just deletes `oauth.json`.
 
+If Google ever revokes the token (you removed the app's access, or the consent
+screen's test-mode tokens expired), the TUI says **`sign-in expired — run
+tubeamp -login`** on the status line and the header indicator shows
+`○ anonymous — run tubeamp -login` — one `tubeamp -login` signs you back in.
+The browser cookie auto-refresh below never kicks in for an OAuth session.
+
 What OAuth unlocks is durable **library** access — your Liked Songs and
 playlists — without the cookie-rotation headache below. A couple of caveats:
 
@@ -299,7 +305,10 @@ failure it shows `re-import failed — run tubeamp -auth <browser>`. If the
 re-import worked but the re-check could not run (offline), the fresh cookies are
 kept and the status says `re-imported from <browser> — could not confirm
 sign-in`. So as long as the browser is still logged in, a stale tubeamp session
-usually heals itself.
+usually heals itself. This applies to **cookie sessions only**: while you are
+signed in via OAuth the re-import never fires (a remembered `auth_browser` from
+an earlier cookie setup will not silently replace your OAuth session with
+cookies — a dead OAuth session prompts `tubeamp -login` instead).
 
 The reliable manual trick is to copy the cookie from a **private /
 incognito** window: log in there, grab the Cookie header, then **close the window

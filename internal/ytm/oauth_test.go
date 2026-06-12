@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -406,5 +407,35 @@ func TestTokenResponse_decodes(t *testing.T) {
 	}
 	if tr.AccessToken != "a" || tr.ExpiresIn != 3599 || tr.RefreshToken != "r" {
 		t.Errorf("decoded = %+v", tr)
+	}
+}
+
+// TestUseOAuth_concurrentModeReads exercises UseOAuth racing the lock-guarded
+// mode reads (UsingOAuth / Authenticated, the same path post()'s dispatch
+// takes). Run under -race this guards the oauth pointer against unsynchronized
+// access if a live client is ever switched to OAuth mid-session (e.g. a future
+// in-TUI login).
+func TestUseOAuth_concurrentModeReads(t *testing.T) {
+	c := NewClient(nil)
+	tok := &OAuthToken{AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().Unix() + 3600}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = c.UsingOAuth()
+				_ = c.Authenticated()
+			}
+		}()
+	}
+	for j := 0; j < 200; j++ {
+		c.UseOAuth(tok, OAuthCreds{ClientID: "cid", ClientSecret: "cs"}, "")
+	}
+	wg.Wait()
+
+	if !c.UsingOAuth() || !c.Authenticated() {
+		t.Error("client should report OAuth mode after UseOAuth")
 	}
 }

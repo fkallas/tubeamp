@@ -224,8 +224,12 @@ type Model struct {
 
 	// logoPhase advances on every logoTickMsg; the wordmark colours each letter
 	// from the theme palette at offset (i+logoPhase), so advancing it flows the
-	// colours across the word (see renderWordmark / logoTickCmd).
-	logoPhase int
+	// colours across the word (see renderWordmark / logoTickCmd). logoTicking
+	// tracks whether a tick is pending: the tick stops re-arming while the
+	// header is hidden (height < logoMinTermHeight) and the resize handler
+	// re-arms it — guarded by this flag — when the header comes back.
+	logoPhase   int
+	logoTicking bool
 }
 
 // New constructs the root model. p (player) and c (ytm client) may each be nil,
@@ -253,6 +257,7 @@ func New(cfg *config.Config, th *theme.Theme, p *player.Player, c *ytm.Client, q
 		volume:           cfg.Volume,
 		hasAuth:          c != nil && c.Authenticated(),
 		reimportFn:       defaultReimport,
+		logoTicking:      true, // Init always arms the first wordmark tick
 	}
 	m.stack = []mainContent{{title: "Liked Songs", tracks: mockLibraryTracks("Liked Songs")}}
 	if p == nil {
@@ -600,6 +605,14 @@ func (m *Model) maybeReimportCmd() tea.Cmd {
 	if m.reimportTried || m.cfg == nil || m.cfg.AuthBrowser == "" || !m.hasAuth {
 		return nil
 	}
+	// A browser re-import refreshes COOKIE sessions only. An OAuth client must
+	// never be silently swapped for a cookie client (OAuth takes precedence
+	// over cookie auth), even when auth_browser is remembered from an earlier
+	// cookie setup; a dead OAuth session is fixed by `tubeamp -login`, which
+	// the invalid_grant paths prompt for.
+	if m.c != nil && m.c.UsingOAuth() {
+		return nil
+	}
 	m.reimportTried = true
 	fn := m.reimportFn
 	browser := m.cfg.AuthBrowser
@@ -719,9 +732,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.search.SetWidth(min(50, m.width-12))
-		// A resize that hides the lyrics panel drops focus back to the main view.
+		// A resize that hides the lyrics panel drops focus back to the main view;
+		// one that grows the band re-clamps the unsynced scroll offset (its max
+		// depends on the band's visible rows).
 		m.reconcileLyricsFocus()
-		return m, nil
+		m.clampLyricsScroll()
+		// Re-arm the wordmark animation when a resize brings the header back
+		// after the tick paused itself while the header was hidden. logoTicking
+		// guards against arming a second tick while one is already pending.
+		var cmd tea.Cmd
+		if m.height >= logoMinTermHeight && !m.logoTicking {
+			m.logoTicking = true
+			cmd = logoTickCmd()
+		}
+		return m, cmd
 
 	case tea.KeyMsg:
 		// ctrl+c always quits, even with an overlay open.
@@ -763,7 +787,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.setError("search failed: " + msg.err.Error())
+			m.setError(requestErrText("search failed: ", msg.err))
 			return m, nil
 		}
 		m.status = ""
@@ -797,7 +821,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
-			m.setError("album search failed: " + msg.err.Error())
+			m.setError(requestErrText("album search failed: ", msg.err))
 			return m, nil
 		}
 		m.status = ""
@@ -812,7 +836,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = ""
 		if msg.err != nil {
-			m.setError("could not load album: " + msg.err.Error())
+			m.setError(requestErrText("could not load album: ", msg.err))
 			return m, nil
 		}
 		if msg.open {
@@ -865,7 +889,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case accountInfoMsg:
 		// A failed check (network down) leaves the indicator unresolved rather
 		// than flashing a spurious "anonymous"; it is a one-shot, never retried.
+		// One failure IS definitive: a revoked OAuth refresh token
+		// (invalid_grant) fails every request the same way, so downgrade the
+		// indicator and prompt the re-login instead of staying silent.
 		if msg.err != nil {
+			if invalidGrant(msg.err) {
+				m.downgradeAuth()
+				m.setError(loginHint)
+			}
 			return m, nil
 		}
 		m.authChecked = true
@@ -892,7 +923,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// remembered browser (replaces the hint on success).
 				return m, m.maybeReimportCmd()
 			}
-			m.setError("could not load playlists: " + msg.err.Error())
+			m.setError(requestErrText("could not load playlists: ", msg.err))
 			return m, nil // keep the mock playlists
 		}
 		m.playlists = msg.playlists
@@ -914,7 +945,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// remembered browser (replaces the hint on success).
 				return m, m.maybeReimportCmd()
 			}
-			m.setError("could not load " + msg.title + ": " + msg.err.Error())
+			m.setError(requestErrText("could not load "+msg.title+": ", msg.err))
 			return m, nil // keep the current (mock) view
 		}
 		m.status = ""
@@ -957,8 +988,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case logoTickMsg:
-		// Advance the wordmark colour-cycle and re-arm the tick. Cheap and
-		// independent of every other Cmd.
+		// Advance the wordmark colour-cycle and re-arm the tick — but only while
+		// the header (the wordmark's only home) is on screen. When the terminal
+		// is too short the animation pauses instead of waking the UI 4×/s for an
+		// invisible wordmark; the resize handler re-arms it when the header
+		// returns. height 0 means no WindowSizeMsg yet — keep ticking.
+		if m.height > 0 && m.height < logoMinTermHeight {
+			m.logoTicking = false
+			return m, nil
+		}
 		m.logoPhase++
 		return m, logoTickCmd()
 	}
@@ -1899,13 +1937,36 @@ func (m *Model) downgradeAuth() {
 	m.authName = ""
 }
 
+// loginHint is the status shown when the OAuth session is revoked: every
+// request will keep failing the same way until the user signs in again.
+const loginHint = "sign-in expired — run tubeamp -login"
+
+// invalidGrant reports whether err's chain carries a Google OAuth
+// "invalid_grant" error (a revoked or expired refresh token), matched with
+// errors.As so the ytm wrapping ("ytm: refresh oauth token: …") is transparent.
+func invalidGrant(err error) bool {
+	var oerr *ytm.OAuthError
+	return errors.As(err, &oerr) && oerr.Code == "invalid_grant"
+}
+
+// requestErrText renders a request failure for the status line, replacing the
+// raw error text with the re-login prompt when the OAuth session is revoked —
+// a generic "could not load …: oauth error" gives the user no remedy.
+func requestErrText(prefix string, err error) string {
+	if invalidGrant(err) {
+		return loginHint
+	}
+	return prefix + err.Error()
+}
+
 // authIndicator returns the styled sign-in status shown right-aligned on the
 // wordmark header row (or the status line when the header is hidden on the
 // shortest terminal), or "" before the one-shot AccountInfo check has
 // resolved. Signed in => "● <name>" in
-// PlayingStyle; an auth file that resolves anonymous (a stale cookie) =>
-// "○ anonymous — cookie stale? see README" in Muted; no auth file at all =>
-// "○ not signed in" in Muted.
+// PlayingStyle; credentials that resolve anonymous => a mode-specific Muted
+// hint ("○ anonymous — run tubeamp -login" for a dead OAuth session,
+// "○ anonymous — cookie stale? see README" for a stale cookie); no credentials
+// at all => "○ not signed in" in Muted.
 func (m Model) authIndicator() string {
 	if !m.authChecked {
 		return ""
@@ -1918,6 +1979,9 @@ func (m Model) authIndicator() string {
 		return m.th.PlayingStyle().Render("● " + name)
 	}
 	if m.hasAuth {
+		if m.c != nil && m.c.UsingOAuth() {
+			return m.th.Muted().Render("○ anonymous — run tubeamp -login")
+		}
 		return m.th.Muted().Render("○ anonymous — cookie stale? see README")
 	}
 	return m.th.Muted().Render("○ not signed in")
@@ -2127,8 +2191,14 @@ func (m Model) contextHints() []hint {
 		return []hint{{"j/k", "move"}, {k.Enter.Help().Key, "play"}, {k.Open.Help().Key, "open album"},
 			{k.Remove.Help().Key, "remove"}, {"J/K", "reorder"}, {k.ClearQueue.Help().Key, "clear"}}
 	case focusLyrics:
-		// Synced lyrics peek-scroll (following vs detached); unsynced plain scroll.
-		if r, ok := m.currentLyric(); ok && r.status == lyricResolved && r.found && r.ly.Synced {
+		// Synced lyrics peek-scroll (following vs detached); unsynced plain
+		// scroll. While loading / no lyrics the scroll keys are no-ops
+		// (scrollLyrics returns early), so advertise only keys that do something.
+		r, ok := m.currentLyric()
+		if !ok || r.status != lyricResolved || !r.found {
+			return []hint{{"h/l", "focus"}, {k.Help.Help().Key, "help"}}
+		}
+		if r.ly.Synced {
 			if m.lyricsDetached {
 				return []hint{{"⏸", "paused"}, {k.Esc.Help().Key, "follow"}}
 			}

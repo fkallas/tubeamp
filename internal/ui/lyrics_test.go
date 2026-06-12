@@ -191,6 +191,57 @@ func TestLyricsUnsyncedScroll(t *testing.T) {
 	}
 }
 
+// TestLyricsUnsyncedScrollReclampedOnResize: 'G' at a short height pins the
+// unsynced offset to that height's max; a resize that GROWS the lyrics band
+// shrinks the max, so the stale offset must be re-clamped immediately (not
+// left under-filling the panel until the next scroll key).
+func TestLyricsUnsyncedScrollReclampedOnResize(t *testing.T) {
+	m := newTestModel(t, 120, 25) // band 9 => 7 content rows
+	m = playingWith(m, "v1", unsyncedResult(60))
+	m = focusLyricsPanel(t, m)
+
+	m = send(m, runes("G"))
+	small := m.LyricsScrollOffset()
+	if small <= 0 {
+		t.Fatalf("after 'G' scroll = %d, want bottom edge (>0)", small)
+	}
+
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40}) // band grows to 10
+	r, _ := m.currentLyric()
+	want := m.lyricsMaxScroll(r.ly.Plain)
+	if got := m.LyricsScrollOffset(); got != want {
+		t.Fatalf("after growing resize scroll = %d, want re-clamped max %d (was %d)", got, want, small)
+	}
+	if got := m.LyricsScrollOffset(); got >= small {
+		t.Fatalf("scroll = %d, want < %d (the larger band must shrink the max)", got, small)
+	}
+	// The bottom line is still on screen — no blank rows below hidden content.
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "PLAIN 59") {
+		t.Errorf("after resize the panel should still show the last line:\n%s", v)
+	}
+}
+
+// TestLyricsHintsOmitScrollWhileUnscrollable: while the focused panel is loading
+// or resolved with nothing, the scroll keys are no-ops, so the hint bar must not
+// advertise them.
+func TestLyricsHintsOmitScrollWhileUnscrollable(t *testing.T) {
+	for name, r := range map[string]lyricResult{
+		"loading":  {status: lyricLoading},
+		"notFound": {status: lyricResolved, found: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newTestModel(t, 120, 40)
+			m = playingWith(m, "v1", r)
+			m = focusLyricsPanel(t, m)
+			for _, h := range m.contextHints() {
+				if h.key == "j/k" || h.key == "ctrl+u/d" || h.key == "g/G" {
+					t.Errorf("%s lyrics hints advertise %q, which is a no-op", name, h.key)
+				}
+			}
+		})
+	}
+}
+
 // TestLyricsSyncedPeekDetachAndResume: a focused synced panel peek-scrolls,
 // detaching auto-follow so the rendered line stops tracking the position; a later
 // EvTimePos past the ~5s resume deadline re-engages follow and the rendered line

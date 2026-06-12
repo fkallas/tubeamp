@@ -253,6 +253,23 @@ func (m *Model) scrollLyricsEdge(top bool) {
 	}
 }
 
+// clampLyricsScroll re-clamps the focused unsynced scroll offset to the current
+// band's maximum. Called on resize: the max offset depends on the band's
+// visible rows, so a band that GROWS can strand a bottom-pinned offset past the
+// new max (blank rows under hidden content until the next scroll key). A synced
+// peek index is line-based and geometry-independent; unfocused panels render
+// from the top / the live line and ignore the offset entirely.
+func (m *Model) clampLyricsScroll() {
+	if m.focus != focusLyrics {
+		return
+	}
+	r, ok := m.currentLyric()
+	if !ok || r.status != lyricResolved || !r.found || r.ly.Synced {
+		return
+	}
+	m.lyricsScroll = clamp(m.lyricsScroll, 0, m.lyricsMaxScroll(r.ly.Plain))
+}
+
 // beginPeek detaches synced auto-follow (initialising the peek index at the live
 // line the first time) and (re)arms the auto-follow resume deadline at the
 // current playback position + lyricsFollowResumeSec.

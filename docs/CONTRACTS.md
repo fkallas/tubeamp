@@ -379,6 +379,9 @@ func (c *Client) SetAuthUser(n int)     // X-Goog-AuthUser index for multi-accou
 func (c *Client) Authenticated() bool   // a cookie Auth OR OAuth mode is set (NOT a live sign-in check)
 func (c *Client) UseOAuth(tok *OAuthToken, creds OAuthCreds, tokenPath string) // switch to Bearer OAuth mode;
                                         // refreshes+persists tok to tokenPath ("" => memory only) on expiry
+func (c *Client) UsingOAuth() bool      // OAuth Bearer mode is configured. Reads the oauth state under the
+                                        // same mutex UseOAuth writes — as do post()'s mode dispatch and
+                                        // Authenticated() — so UseOAuth on a live client is race-free
 
 // OAuth device-flow + token store (mirrors ytmusicapi). User supplies creds.
 type OAuthCreds struct{ ClientID, ClientSecret string }
@@ -655,7 +658,11 @@ letter `i` takes `theme.Palette()[(i+phase) % len(palette)]` (image/color values
 converted to lipgloss colours), so advancing `phase` flows the colours across the
 word. A `tea.Tick` (~250ms, started in `Init` and re-issued on each
 `logoTickMsg`) increments the phase (a model field) and the view re-renders; the
-tick is cheap and independent of every other Cmd. The Muted "v0.1.0" version tag
+tick is cheap and independent of every other Cmd. While the header is hidden the
+tick is NOT re-armed — the animation pauses instead of waking the UI 4×/s for an
+invisible wordmark — and a resize that brings the header back re-arms it,
+guarded by a model flag (`logoTicking`) so at most one tick is ever pending. The
+Muted "v0.1.0" version tag
 and the sign-in indicator ride the same row, right-aligned. When terminal height
 < `logoMinTermHeight` (= `minHeight + logoHeight`) the header is hidden and the
 panel area reclaims that row (the panel-area floor needs that row at the shortest
@@ -667,17 +674,29 @@ at the right end of the wordmark header row (ANSI-aware-truncated with an
 ellipsis when a long account name would not fit), or right-aligned on the bottom
 status line when the header is hidden (truncated the same way — on either home an
 oversized indicator must clip, never widen the row past the terminal and break
-the full-width frame invariant). Signed in => "● <name>" in PlayingStyle; an auth
-file that resolves anonymous (a stale cookie) => "○ anonymous — cookie stale?
-see README" in Muted; no auth file => "○ not signed in" in Muted. A failed check
-(network down) leaves the indicator blank (no retry). A library browse that
+the full-width frame invariant). Signed in => "● <name>" in PlayingStyle;
+credentials that resolve anonymous => a mode-specific Muted hint — "○ anonymous
+— cookie stale? see README" in cookie mode, "○ anonymous — run tubeamp -login"
+when the client `UsingOAuth()`; no credentials => "○ not signed in" in Muted. A
+failed check (network down) leaves the indicator blank (no retry) — EXCEPT a
+revoked OAuth session: an error chain carrying a `*ytm.OAuthError` with code
+`invalid_grant` (matched with `errors.As`, so the ytm refresh wrapping is
+transparent) is definitive, downgrades the indicator to anonymous, and toasts
+`sign-in expired — run tubeamp -login`. The same re-login prompt replaces the
+raw error text whenever a search / album / library load fails with
+invalid_grant (`requestErrText`). A library browse that
 later returns `ErrNotSignedIn` downgrades the resolved state to anonymous (the
 cookie rotated mid-session), flipping the indicator to the stale-cookie hint.
 Tests inject the result via `accountInfoMsg`, never the network.
 
-**Stale-session auto-refresh.** When the resolved state is anonymous (the startup
+**Stale-session auto-refresh (cookie mode ONLY).** When the resolved state is
+anonymous (the startup
 `AccountInfo`, or a library browse via the downgrade path) AND `cfg.AuthBrowser`
-is set AND an auth file is present (`hasAuth`), the model fires a ONE-SHOT
+is set AND an auth file is present (`hasAuth`) AND the client is NOT in OAuth
+mode (`UsingOAuth()` — a remembered `auth_browser` from an earlier cookie setup
+must never silently swap an OAuth Bearer client for a cookie client; a dead
+OAuth session is prompted to `tubeamp -login` via the invalid_grant path
+instead), the model fires a ONE-SHOT
 re-import `Cmd` — guarded by `reimportTried` so it happens at most once per
 session (no reimport loop). The Cmd runs the injectable `reimportFn`
 (default `defaultReimport`: `auth.ImportFromBrowser(cfg.AuthBrowser)` →
@@ -773,7 +792,12 @@ paths).
   ticker: each scroll arms `lyricsResumeAt = m.timePos + lyricsFollowResumeSec`
   (5s) and a later `EvTimePos` past it re-engages (`maybeResumeLyrics`). Leaving
   `focusLyrics` (h/l away, panel hides, or a track change) also re-engages follow.
-  Detached state ONLY applies while `focusLyrics` is active. Test seams:
+  Detached state ONLY applies while `focusLyrics` is active. While the lyrics
+  are still loading (or resolved with none) the scroll keys are no-ops and the
+  hint bar advertises no scroll bindings. A resize re-clamps the focused
+  unsynced offset to the new band's max (`clampLyricsScroll`, called beside
+  `reconcileLyricsFocus`) so a grown band never strands a bottom-pinned offset
+  past the new bottom edge. Test seams:
   `Model.LyricsScrollOffset()` and `Model.LyricsDetached()`.
 - **Fetch + cache.** On a track change (new videoID) the lyrics state is
   set to "loading" and a `tea.Cmd` (never blocking `Update`) calls

@@ -93,7 +93,17 @@ func (c *Client) SetAuthUser(n int) {
 // stale cookie or revoked token may still resolve anonymous on YouTube's side);
 // use AccountInfo to confirm the live sign-in state.
 func (c *Client) Authenticated() bool {
-	return c.auth != nil || c.oauth != nil
+	return c.auth != nil || c.UsingOAuth()
+}
+
+// UsingOAuth reports whether the client is in OAuth Bearer mode (UseOAuth was
+// called). The read takes the same mutex UseOAuth writes under, so callers —
+// including post()'s mode dispatch and Authenticated() — are safe against a
+// concurrent UseOAuth on a live client.
+func (c *Client) UsingOAuth() bool {
+	c.oauthMu.Lock()
+	defer c.oauthMu.Unlock()
+	return c.oauth != nil
 }
 
 // oauthAuthorization returns the Authorization header value for OAuth mode,
@@ -137,7 +147,7 @@ func (c *Client) post(ctx context.Context, endpoint string, payload any) ([]byte
 	req.Header.Set("X-Origin", ytmOrigin)
 
 	switch {
-	case c.oauth != nil:
+	case c.UsingOAuth():
 		// OAuth mode: a Bearer access token (refreshed when expired) and the
 		// OAuth client User-Agent — no Cookie, no SAPISIDHASH. The InnerTube
 		// payload still carries the WEB_REMIX context (ytmusicapi does the same).
