@@ -149,11 +149,13 @@ func run(cfg *config.Config, themeOverride string) error {
 
 	// Local play history (tubeamp's own — Google removed watch-history from the
 	// APIs) backs the Library "History" section and records each play. The
-	// enricher fills the album + duration the Data API omits, from anonymous
-	// InnerTube (the cookie/anonymous `client`, never OAuth), with a permanent
-	// on-disk cache; it backs the Library "Albums" section's progressive fill.
+	// enricher fills the album + duration the Data API omits, from ANONYMOUS
+	// InnerTube — a dedicated unauthenticated client, never the cookie session
+	// (so the per-song watch-next probes are not attributed to the account) and
+	// never OAuth (InnerTube rejects it) — with a permanent on-disk cache; it
+	// backs the Library "Albums" section's progressive fill.
 	hist := history.New(filepath.Join(config.DataDir(), "history.json"))
-	enr := enrich.NewEnricher(store.NewCache(filepath.Join(config.CacheDir(), "enrich")), client)
+	enr := enrich.NewEnricher(store.NewCache(filepath.Join(config.CacheDir(), "enrich")), ytm.NewClient(nil))
 
 	// Library source selection. OAuth (the official YouTube Data API) is the
 	// durable library source and is preferred when configured + a token is

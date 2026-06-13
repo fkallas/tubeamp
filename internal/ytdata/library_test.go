@@ -125,6 +125,65 @@ func TestLibrarySongs_aggregatesAndDedups(t *testing.T) {
 	}
 }
 
+// TestLibrarySongs_ctxCancelFatal — global cancellation mid-aggregate is fatal,
+// not a per-playlist skip: once the ctx is dead EVERY remaining playlist fails
+// the same way, and skipping them all would return a silently truncated
+// aggregate as if it were the whole library.
+func TestLibrarySongs_ctxCancelFatal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch r.URL.Path {
+		case "/playlists":
+			io.WriteString(w, `{"items":[
+				{"id":"PL1","snippet":{"title":"One"},"contentDetails":{"itemCount":1}},
+				{"id":"PL2","snippet":{"title":"Two"},"contentDetails":{"itemCount":1}}
+			]}`)
+		case "/playlistItems":
+			if q.Get("playlistId") == "LL" {
+				io.WriteString(w, oneItem("liked1"))
+				return
+			}
+			// The ctx "expires" while the first playlist is being fetched; from
+			// here every request fails under a dead ctx.
+			cancel()
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"error":{"code":500}}`)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	if _, err := c.LibrarySongs(ctx); err == nil {
+		t.Fatal("LibrarySongs: want error under a cancelled ctx, got a truncated aggregate as success")
+	}
+}
+
+// TestLibraryPlaylists_pageCapStopsLoopingToken — a pathological stream of empty
+// pages that keeps carrying a nextPageToken cannot spin past the page ceiling
+// (the item cap alone would never trip on empty pages).
+func TestLibraryPlaylists_pageCapStopsLoopingToken(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		io.WriteString(w, `{"nextPageToken":"LOOP","items":[]}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	out, err := c.LibraryPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("LibraryPlaylists: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("got %d playlists, want 0", len(out))
+	}
+	if calls != playlistsPageCap {
+		t.Errorf("server calls = %d, want %d (the page ceiling)", calls, playlistsPageCap)
+	}
+}
+
 // TestLibrarySongs_likedFailureFatal — if the spine call (LikedSongs) fails, the
 // whole aggregate fails (not a partial).
 func TestLibrarySongs_likedFailureFatal(t *testing.T) {

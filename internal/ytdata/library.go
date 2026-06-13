@@ -2,7 +2,8 @@ package ytdata
 
 import (
 	"context"
-	"log"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -14,9 +15,13 @@ import (
 // LibraryPlaylists order), deduped by VideoID with the first occurrence winning
 // (so a song's liked-list position is preserved over a later playlist copy).
 //
-// It is deliberately resilient: a single playlist fetch that fails is logged and
-// skipped, yielding a partial-but-usable aggregate rather than a hard error. Only
-// a LikedSongs or LibraryPlaylists failure (the spine of the aggregate) is fatal.
+// It is deliberately resilient: a single playlist fetch that fails is skipped
+// (silently — stderr would scribble over the live TUI), yielding a
+// partial-but-usable aggregate rather than a hard error. Only a LikedSongs or
+// LibraryPlaylists failure (the spine of the aggregate) is fatal — as is a
+// cancelled/expired ctx: once the deadline has passed EVERY remaining playlist
+// would fail the same way and the truncated aggregate would masquerade as the
+// complete library, so global cancellation returns the error instead.
 // Be aware this fans out one playlistItems pagination per playlist, so it is the
 // most quota- and time-expensive call in this package; callers should cache the
 // result and avoid calling it on a hot path.
@@ -47,8 +52,15 @@ func (c *Client) LibrarySongs(ctx context.Context) ([]model.Track, error) {
 	for _, pl := range playlists {
 		tracks, err := c.PlaylistTracks(ctx, pl.ID)
 		if err != nil {
-			// Log-skip: a single bad playlist must not sink the whole aggregate.
-			log.Printf("ytdata.LibrarySongs: skipping playlist %q (%s): %v", pl.ID, pl.Title, err)
+			// Global cancellation/deadline is fatal: every remaining playlist
+			// would fail the same way, and skipping them all would return a
+			// silently truncated aggregate as if it were the whole library.
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("ytdata.LibrarySongs: %w", err)
+			}
+			// Skip: a single bad playlist must not sink the whole aggregate.
+			// Deliberately not logged — the only caller runs under a Bubble Tea
+			// alt-screen TUI, where a stderr line corrupts the display.
 			continue
 		}
 		add(tracks)

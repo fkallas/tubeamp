@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/fkallas/tubeamp/internal/model"
 )
@@ -55,6 +56,51 @@ func TestRecord_dedupMovesToFront(t *testing.T) {
 	}
 	if got[0].Title != "A again" {
 		t.Errorf("front entry Title = %q, want the latest record's title", got[0].Title)
+	}
+}
+
+// TestRecordAt_outOfOrderArrivalsKeepPlayOrder — two records arriving out of
+// order (concurrent Cmd goroutines under fast track-skipping) still land in
+// play order, most-recent first, because ordering is by the played-at time
+// captured at the transition, not by write-arrival order.
+func TestRecordAt_outOfOrderArrivalsKeepPlayOrder(t *testing.T) {
+	s := New(storePath(t))
+	base := time.Now()
+	// "b" was played AFTER "a", but its record lands first.
+	if err := s.RecordAt(model.Track{VideoID: "b", Title: "B"}, base.Add(2*time.Second)); err != nil {
+		t.Fatalf("RecordAt(b): %v", err)
+	}
+	if err := s.RecordAt(model.Track{VideoID: "a", Title: "A"}, base.Add(time.Second)); err != nil {
+		t.Fatalf("RecordAt(a): %v", err)
+	}
+	got := s.List()
+	if len(got) != 2 || got[0].VideoID != "b" || got[1].VideoID != "a" {
+		t.Fatalf("List = %+v, want [b a] (play order, not arrival order)", got)
+	}
+}
+
+// TestLegacyFileWithoutPlayedAt — a history file written before the played_at
+// field reads fine: its entries keep their order, sorting after any
+// timestamped entries (a new record lands in front).
+func TestLegacyFileWithoutPlayedAt(t *testing.T) {
+	path := storePath(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `[{"VideoID":"old1","Title":"Old One"},{"VideoID":"old2","Title":"Old Two"}]`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(path)
+	if got := s.List(); len(got) != 2 || got[0].VideoID != "old1" || got[1].VideoID != "old2" {
+		t.Fatalf("legacy List = %+v, want [old1 old2]", got)
+	}
+	if err := s.Record(model.Track{VideoID: "new1", Title: "New"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	got := s.List()
+	if len(got) != 3 || got[0].VideoID != "new1" || got[1].VideoID != "old1" || got[2].VideoID != "old2" {
+		t.Fatalf("List = %+v, want [new1 old1 old2]", got)
 	}
 }
 

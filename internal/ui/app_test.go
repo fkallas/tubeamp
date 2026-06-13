@@ -18,6 +18,7 @@ import (
 	"github.com/fkallas/tubeamp/internal/enrich"
 	"github.com/fkallas/tubeamp/internal/history"
 	"github.com/fkallas/tubeamp/internal/model"
+	"github.com/fkallas/tubeamp/internal/store"
 	"github.com/fkallas/tubeamp/internal/theme"
 	"github.com/fkallas/tubeamp/internal/ytm"
 )
@@ -1858,6 +1859,88 @@ func TestLibProviderNilKeepsDerivedSectionsMock(t *testing.T) {
 	}
 }
 
+// TestAggregateSessionCached — the whole-library aggregate is fetched over the
+// network once per session; revisiting a derived section re-derives from the
+// cached copy (no second LibrarySongs fan-out).
+func TestAggregateSessionCached(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "Aggregate One", Artists: []string{"A"}},
+	}}
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Songs")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("first enter dispatched no command")
+	}
+	m = send(m, cmd())
+	if f.aggregateCalls != 1 {
+		t.Fatalf("first visit: LibrarySongs calls = %d, want 1", f.aggregateCalls)
+	}
+
+	// Re-enter the section: the Cmd re-derives from the session cache.
+	m.setFocus(focusLibrary)
+	mm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("second enter dispatched no command")
+	}
+	m = send(m, cmd())
+	if f.aggregateCalls != 1 {
+		t.Errorf("revisit re-fetched the aggregate: LibrarySongs calls = %d, want 1", f.aggregateCalls)
+	}
+	top := m.stack[len(m.stack)-1]
+	if top.title != "Songs" || len(top.tracks) != 1 {
+		t.Fatalf("revisit frame = {title:%q tracks:%d}, want {Songs, 1}", top.title, len(top.tracks))
+	}
+
+	// A session downgrade (revoked OAuth / rotated cookie) drops the cache.
+	m.downgradeAuth()
+	if m.libAgg != nil {
+		t.Error("downgradeAuth kept the session aggregate cache")
+	}
+}
+
+// cookieOnlyLibrary is a libraryProvider WITHOUT the LibrarySongs extension —
+// the shape of a cookie *ytm.Client library source.
+type cookieOnlyLibrary struct{ f *fakeLibrary }
+
+func (c cookieOnlyLibrary) AccountInfo(ctx context.Context) (string, bool, error) {
+	return c.f.AccountInfo(ctx)
+}
+func (c cookieOnlyLibrary) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error) {
+	return c.f.LibraryPlaylists(ctx)
+}
+func (c cookieOnlyLibrary) LikedSongs(ctx context.Context) ([]model.Track, error) {
+	return c.f.LikedSongs(ctx)
+}
+func (c cookieOnlyLibrary) PlaylistTracks(ctx context.Context, id string) ([]model.Track, error) {
+	return c.f.PlaylistTracks(ctx, id)
+}
+
+// TestCookieSessionDerivedSectionsHintOAuth — a signed-in cookie session cannot
+// load the OAuth-only aggregate; the derived sections fall back to mock data
+// and SAY SO, instead of silently presenting the demo tracks as the user's
+// library under the signed-in indicator.
+func TestCookieSessionDerivedSectionsHintOAuth(t *testing.T) {
+	lib := cookieOnlyLibrary{f: &fakeLibrary{name: "Ada", signedIn: true}}
+	m := newLibModel(t, lib)
+
+	for _, section := range []string{"Songs", "Artists", "Albums"} {
+		mc := m
+		mc.libCursor = indexOf(mc.libItems, section)
+		mm, cmd := mc.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		mc = mm.(Model)
+		if cmd != nil {
+			t.Errorf("%s: cookie library dispatched an aggregate command", section)
+		}
+		if !strings.Contains(mc.status, "tubeamp -login") {
+			t.Errorf("%s: status = %q, want the OAuth hint", section, mc.status)
+		}
+	}
+}
+
 // ── Albums section (background enrichment) + History + recording ─────────────
 
 // TestLibProviderAlbumsSectionEnrichesProgressively asserts Library→"Albums"
@@ -1907,6 +1990,73 @@ func TestLibProviderAlbumsSectionEnrichesProgressively(t *testing.T) {
 	}
 }
 
+// TestEnrichKeepsDeliberateAlbumSelection — the Albums list re-sorts as albums
+// resolve; a selection the user deliberately made must follow the album's
+// identity to its new index, not drift to whatever lands at the old row
+// (mirrors the search-results refresh).
+func TestEnrichKeepsDeliberateAlbumSelection(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "T1", Artists: []string{"Z"}, Album: "Zebra", AlbumID: "MPRE_z"},
+		{VideoID: "v2", Title: "T2", Artists: []string{"A"}},
+	}}
+	m := newLibModel(t, f)
+	m.libCursor = indexOf(m.libItems, "Albums")
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	m = send(m, cmd())
+
+	// The user deliberately selects "Zebra" (the only resolved album so far).
+	m.stack[len(m.stack)-1].cursor = 0
+	m.stack[len(m.stack)-1].cursorMoved = true
+
+	// An enrich chunk resolves "Alpha", which sorts ABOVE the selection.
+	m = send(m, enrichResultMsg{gen: m.libGen, details: []enrich.Detail{
+		{VideoID: "v2", Album: "Alpha", AlbumID: "MPRE_a"},
+	}})
+	top := m.stack[len(m.stack)-1]
+	if len(top.albums) != 2 {
+		t.Fatalf("albums = %d, want 2", len(top.albums))
+	}
+	if got := top.albums[top.cursor].BrowseID; got != "MPRE_z" {
+		t.Errorf("cursor drifted to %q, want the selected MPRE_z to keep its identity", got)
+	}
+}
+
+// TestEscBackToAlbumsResumesEnrichment — 'o'-opening an album abandons the
+// in-flight enrich chunk (libGen bump, deliberate); esc-ing back onto the
+// Albums list must re-dispatch the remaining queue under the new generation
+// instead of leaving the list silently half-enriched.
+func TestEscBackToAlbumsResumesEnrichment(t *testing.T) {
+	f := &fakeLibrary{aggregate: []model.Track{
+		{VideoID: "v1", Title: "T1", Artists: []string{"A"}, Album: "Album X", AlbumID: "MPRE_x"},
+		{VideoID: "v3", Title: "T3", Artists: []string{"B"}},
+	}}
+	enr := enrich.NewEnricher(store.NewCache(t.TempDir()), nil)
+	m := New(config.Default(), theme.Default(), nil, ytm.NewClient(nil), core.NewQueue(), f, nil, enr)
+	m = send(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.libCursor = indexOf(m.libItems, "Albums")
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	m = send(m, cmd()) // aggregate lands; v3 queued for enrichment
+	if len(m.enrichQueue) == 0 {
+		t.Fatal("setup: nothing queued for enrichment")
+	}
+
+	// 'o' on the album pushes the album view, abandoning the in-flight chunk.
+	m.pushAlbum(model.Album{BrowseID: "MPRE_x", Title: "Album X"}, nil)
+
+	// esc pops back onto the Albums list: enrichment must resume.
+	mm, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("esc back onto Albums dispatched no resume command")
+	}
+	if !strings.Contains(m.status, "enriching albums") {
+		t.Errorf("status = %q, want the enriching progress line", m.status)
+	}
+}
+
 // TestEnrichResultStaleIgnored asserts a background enrichment result whose
 // generation no longer matches (the user changed section) is dropped.
 func TestEnrichResultStaleIgnored(t *testing.T) {
@@ -1930,7 +2080,8 @@ func TestEnrichResultStaleIgnored(t *testing.T) {
 }
 
 // TestLibProviderHistorySectionListsRecorded asserts Library→"History" reads the
-// local play-history store into the main view (no network command).
+// local play-history store into the main view via a Cmd (the store read is file
+// IO, so it must not run on the Update goroutine).
 func TestLibProviderHistorySectionListsRecorded(t *testing.T) {
 	hist := history.New(filepath.Join(t.TempDir(), "history.json"))
 	if err := hist.Record(model.Track{VideoID: "h1", Title: "Recently Played"}); err != nil {
@@ -1943,9 +2094,10 @@ func TestLibProviderHistorySectionListsRecorded(t *testing.T) {
 
 	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = mm.(Model)
-	if cmd != nil {
-		t.Errorf("History enter dispatched a command (the local store reads synchronously)")
+	if cmd == nil {
+		t.Fatal("History enter dispatched no command (the store read must run off the Update goroutine)")
 	}
+	m = send(m, cmd())
 	top := m.stack[len(m.stack)-1]
 	if top.title != "History" || len(top.tracks) != 1 {
 		t.Fatalf("History frame = {title:%q tracks:%d}, want {History, 1}", top.title, len(top.tracks))

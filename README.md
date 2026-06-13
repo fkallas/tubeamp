@@ -26,14 +26,19 @@ song/album search and album browsing into the search view. For a **signed-in**
 session it also loads your real library: the Playlists panel fills with your
 playlists on startup, Library → "Liked Songs" loads your Liked Songs, opening
 a playlist loads its tracks, and the remaining Library sections are wired off
-your library too (radio not yet). The library is read through the official
+your library too (radio not yet) — though the derived Songs/Artists/Albums
+sections need the **OAuth** sign-in specifically (see the section notes
+below). The library is read through the official
 **YouTube Data API** when you sign in with OAuth (durable, no cookie rotation),
 or through cookies when you sign in that way; search and playback always use the
 cookie/anonymous InnerTube client. An **anonymous** session keeps the demo/mock
 library and toasts a sign-in hint.
 
 The Library sections behave like this (all derived honestly from what the APIs
-actually expose):
+actually expose). Songs, Artists and Albums are built from a whole-library
+aggregate that only the **OAuth** (Data API) session exposes — on a
+cookie-signed-in session those three sections show demo data and say so
+("needs the OAuth sign-in — run tubeamp -login"):
 
 - **Liked Songs** — your Liked Songs (first pages today; full pagination is on).
 - **Songs** — your *whole library* aggregated: Liked Songs plus every owned
@@ -43,7 +48,9 @@ actually expose):
   reach YT Music's artist pages, so this grouping is the honest substitute.)
 - **Albums** — the aggregate grouped by album. The Data API exposes neither a
   song's album nor its duration, so tubeamp fills those in via **anonymous
-  InnerTube** lookups, cached permanently on disk. The list therefore **fills in
+  InnerTube** lookups (a dedicated unauthenticated client — the per-song probes
+  are never attributed to your account), cached permanently on disk. The list
+  therefore **fills in
   progressively** the first time (watch "enriching albums… N/M" on the status
   line) and is instant on later visits. `enter`/`o` on an album opens it.
 - **History** — tubeamp's **own local play history** (most-recent first), not

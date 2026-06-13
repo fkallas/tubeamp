@@ -37,8 +37,13 @@ const (
 	// pageSize is the per-request maxResults (the Data API caps it at 50).
 	pageSize = 50
 
-	// playlistsItemCap bounds LibraryPlaylists pagination (~4 pages).
+	// playlistsItemCap and playlistsPageCap bound LibraryPlaylists pagination
+	// (~4 pages of 50, +1 page of slack). The page counter is the hard stop: a
+	// pathological response stream of empty pages that keeps carrying a
+	// nextPageToken never grows the item count, so the item cap alone would
+	// spin until the ctx deadline (or forever on a background ctx).
 	playlistsItemCap = 200
+	playlistsPageCap = 5
 
 	// tracksItemCap and tracksPageCap bound a single track listing's full
 	// pagination. playlistItems follows nextPageToken to exhaustion; these are a
@@ -123,13 +128,15 @@ func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, e
 
 // LibraryPlaylists returns the playlists the user OWNS via
 // playlists?part=snippet,contentDetails&mine=true, following nextPageToken until
-// exhausted or the ~200 item cap is reached. NOTE: unlike the cookie path's
-// FEmusic_liked_playlists browse, mine=true does not include saved/followed
-// playlists from other channels — the Data API exposes no equivalent.
+// exhausted or the ~200 item / ~5 page safety ceiling is reached (a
+// runaway/looping nextPageToken cannot spin forever). NOTE: unlike the cookie
+// path's FEmusic_liked_playlists browse, mine=true does not include
+// saved/followed playlists from other channels — the Data API exposes no
+// equivalent.
 func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error) {
 	var out []model.Playlist
 	pageToken := ""
-	for {
+	for page := 0; page < playlistsPageCap; page++ {
 		q := url.Values{
 			"part":       {"snippet,contentDetails"},
 			"mine":       {"true"},

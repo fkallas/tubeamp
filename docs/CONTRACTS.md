@@ -567,7 +567,9 @@ func (c *Client) AccountInfo(ctx context.Context) (name string, signedIn bool, e
 func (c *Client) LibraryPlaylists(ctx context.Context) ([]model.Playlist, error)
                                        // playlists?part=snippet,contentDetails&mine=true
                                        // &maxResults=50, follows nextPageToken to a
-                                       // ~200 cap. id->ID, title->Title,
+                                       // ~200-item / ~5-page cap (the page counter is
+                                       // the hard stop: a looping token over empty
+                                       // pages cannot spin). id->ID, title->Title,
                                        // contentDetails.itemCount->TrackCount.
                                        // OWNED playlists only — mine=true returns no
                                        // saved/followed playlists, unlike the cookie
@@ -589,9 +591,13 @@ func (c *Client) LibrarySongs(ctx context.Context) ([]model.Track, error)
                                        // ++ every LibraryPlaylists playlist's tracks,
                                        // deduped by VideoID (first wins), liked first
                                        // then playlists (in LibraryPlaylists order). A
-                                       // single playlist fetch failure is log-skipped
-                                       // (partial result); only a LikedSongs/
-                                       // LibraryPlaylists failure is fatal. The most
+                                       // single playlist fetch failure is silently
+                                       // skipped (partial result; never logged — the
+                                       // caller holds a TUI alt screen). Fatal: a
+                                       // LikedSongs/LibraryPlaylists failure, or a
+                                       // cancelled/expired ctx (a dead ctx would
+                                       // skip-truncate every remaining playlist and
+                                       // masquerade as the whole library). The most
                                        // quota/time-expensive call here — cache it.
 
 // Pure library-grouping helpers (no network). GroupArtists/AlbumsFromTracks back
@@ -625,8 +631,11 @@ The album/duration the Data API omits are filled separately by `internal/enrich`
 
 ## internal/enrich
 
-Fills the album + duration the OAuth Data API omits, from anonymous InnerTube,
-with a **permanent** on-disk cache (a song's album never changes). Designed for
+Fills the album + duration the OAuth Data API omits, from anonymous InnerTube
+(main.go wires a dedicated unauthenticated `ytm.NewClient(nil)` — never the
+cookie session, so the per-song probes are not account-attributed, and never
+OAuth, which InnerTube rejects), with a **permanent** on-disk cache (a song's
+album never changes). Designed for
 progressive background enrichment from the UI: `Fill` reports the still-missing
 videoIDs, which the UI feeds to `EnrichMissing` in Cmd-sized chunks.
 
@@ -664,17 +673,26 @@ EnrichMissing fills + caches; concurrency asserted bounded).
 ## internal/history
 
 tubeamp's OWN local play history (Google removed watch-history from the APIs).
-An ordered `[]model.Track`, most-recent first, deduped by VideoID (a replay moves
-the track to the front), capped at ~200. Persisted as JSON at
-`DataDir()/history.json` with atomic 0600 writes; a missing/corrupt file reads as
-empty (never crashes). Mutex-guarded; safe for concurrent use.
+An ordered track list, most-recent first, deduped by VideoID (a replay moves the
+track to the front), capped at ~200. Each entry persists the time it was played
+(`played_at`) and the list is kept ordered by it, so records ARRIVING out of
+order (concurrent Cmd goroutines under fast track-skipping) still land in play
+order. Persisted as JSON at `DataDir()/history.json` with atomic 0600 writes; a
+missing/corrupt file reads as empty (never crashes), and pre-`played_at` files
+read fine (their entries sort after any timestamped ones, original order kept).
+Mutex-guarded; safe for concurrent use.
 
 ```go
 // package history
 type Store struct{ ... }
 func New(path string) *Store                 // DataDir()/history.json by convention; file created lazily
-func (s *Store) Record(track model.Track) error // move to front, dedup by VideoID, cap, atomic 0600 write;
-                                              // empty-VideoID track ignored; reads degrade corrupt=>empty
+func (s *Store) Record(track model.Track) error // RecordAt(track, time.Now())
+func (s *Store) RecordAt(track model.Track, at time.Time) error
+                                              // dedup by VideoID, insert in play order (by at,
+                                              // most-recent first), cap, atomic 0600 write; callers
+                                              // capture at WHEN the play happens (not when the write
+                                              // runs); empty-VideoID track ignored; reads degrade
+                                              // corrupt=>empty
 func (s *Store) List() []model.Track          // most-recent first; missing/corrupt => empty slice
 ```
 
@@ -815,7 +833,9 @@ type libraryProvider interface {
 // librarySongsProvider is the OPTIONAL extension exposing the whole-library
 // aggregate behind the derived sections (Songs/Artists/Albums). Only the
 // OAuth-backed *ytdata.Client implements it (it has LibrarySongs); a cookie
-// *ytm.Client does NOT, so on a cookie session those three sections stay mock.
+// *ytm.Client does NOT, so on a cookie session those three sections stay mock —
+// and SAY SO ("needs the OAuth sign-in — run tubeamp -login (showing demo
+// data)") rather than passing the demo tracks off as the user's library.
 // The UI reaches it by type-asserting m.lib, so libraryProvider stays unchanged.
 type librarySongsProvider interface {
     LibrarySongs(context.Context) ([]model.Track, error)
@@ -1153,7 +1173,12 @@ The remaining Library sections are wired off the whole-library aggregate
 local subsystems (`internal/enrich`, `internal/history`). All load into the
 main view on `enter`, are gated on a real source, and fall back to mock data
 when none is present (with the sign-in hint when `m.lib == nil` but a search
-client exists):
+client exists, and the explicit "needs the OAuth sign-in — run tubeamp -login"
+hint on a cookie session, whose source lacks `LibrarySongs`). The aggregate
+itself is fetched over the network ONCE per session (`m.libAgg` — honoring
+LibrarySongs's cache-me contract): revisits to Songs/Artists/Albums re-derive
+from the cached copy via a Cmd that re-runs only the local enrichment fill.
+`downgradeAuth` drops the cache (it belonged to the dead session):
 
 - **Songs** → `lib.LibrarySongs` into a plain track table titled "Songs"
   (cache-resident enrichment is applied first, so already-known durations show).
@@ -1164,15 +1189,24 @@ client exists):
   (album rows reusing the search Albums rendering + the album-row `enter`/`o`
   GetAlbum flow). Because the Data API omits the album, the aggregate is enriched
   progressively in the background via `internal/enrich`: `Fill` from the
-  permanent cache is instant, the still-missing videoIDs are fetched in
+  permanent cache runs inside the load Cmd (per-track disk reads — never on the
+  Update goroutine), the still-missing videoIDs are fetched in
   `enrichChunk`-sized Cmds (`enrichResultMsg`), and the album list refreshes as
-  they resolve. Progress shows on the status line ("enriching albums… N/M"). The
-  chunk Cmds ride `libGen`, so a section change (esc, new search/section, opening
-  an album) abandons the in-flight enrichment. Revisits fill instantly from cache.
-- **History** → `internal/history.List` into a plain table titled "History".
+  they resolve — a deliberately-made selection (`cursorMoved`) follows its
+  album's BrowseID through the re-sort instead of drifting (mirrors the search
+  -results refresh). Progress shows on the status line ("enriching albums… N/M").
+  The chunk Cmds ride `libGen`, so a section change (esc, new search/section,
+  opening an album) abandons the in-flight enrichment — but esc-ing back onto
+  the Albums list resumes the remaining queue under the new generation, so the
+  list never silently stays half-enriched. Revisits fill instantly from cache.
+- **History** → `internal/history.List` into a plain table titled "History",
+  loaded via a Cmd (the store read is file IO — never on the Update goroutine).
   This is tubeamp's OWN local play history (not YouTube's): each now-playing
-  transition records the track via `history.Record` in a Cmd (off `reflectCurrent`,
-  never blocking Update). Gated on `m.hist != nil`.
+  transition records the track via `history.RecordAt` in a Cmd (off
+  `reflectCurrent`, never blocking Update), with the play time captured at Cmd
+  CREATION (Update is serial ⇒ creation order is transition order), so
+  fast-skip records that execute out of order still land in play order. Gated
+  on `m.hist != nil`.
 
 `enter` on the derived sections issues a `libAggregateMsg` (Songs/Artists/Albums)
 guarded by `libGen`, degrading on `ErrNotSignedIn` like the other library loads.
@@ -1234,7 +1268,11 @@ notice); `buildClient(cfg)` — the InnerTube client for search + playback, cook
 OAuth library) is preferred; else if the cookie client is `Authenticated()` the
 same `*ytm.Client` doubles as the library; else an **untyped nil** (mock data —
 the three `ui.New` calls keep the nil literal untyped so `m.lib != nil` is a true
-interface-nil check). Then `core.NewQueue`; `ui.New(cfg, th, p, client, q, lib)`;
+interface-nil check). Then `core.NewQueue`; the history store
+(`history.New(DataDir()/history.json)`) and the enricher
+(`enrich.NewEnricher(store.NewCache(CacheDir()/enrich), ytm.NewClient(nil))` —
+a DEDICATED anonymous InnerTube client, never the cookie `client` and never
+OAuth); `ui.New(cfg, th, p, client, q, lib, hist, enr)`;
 `tea.NewProgram(..., tea.WithAltScreen())`. On exit: `player.Close()` — a DETACH,
 so mpv keeps playing in the background.
 

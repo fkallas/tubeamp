@@ -200,6 +200,15 @@ type Model struct {
 	enrichQueue  []string
 	enrichTotal  int
 
+	// libAgg is the per-session cache of the whole-library aggregate
+	// (lib.LibrarySongs). LibrarySongs fans out one pagination per playlist —
+	// the most quota- and time-expensive call in ytdata, whose contract tells
+	// callers to cache it — so the aggregate is fetched once per session and
+	// revisits to Songs/Artists/Albums only re-run the (local, off-thread)
+	// enrichment fill. Cleared when the session downgrades to anonymous, so a
+	// re-login starts fresh.
+	libAgg []model.Track
+
 	// Overlays.
 	overlay   overlayKind
 	help      overlay.Help
@@ -501,13 +510,17 @@ type libTracksMsg struct {
 
 // libAggregateMsg carries a whole-library aggregate (lib.LibrarySongs) load,
 // destined for one of the derived sections named by section ("Songs", "Artists"
-// or "Albums"). gen ties it to the libGen that issued it; err is
-// ytm.ErrNotSignedIn for an anonymous session, handled like the other library
-// loads (downgrade + sign-in hint).
+// or "Albums"). tracks already carry the cache-resident enrichment (Fill runs
+// in the Cmd, off the Update goroutine — it does one disk read per track);
+// missing is Fill's list of videoIDs still lacking album/duration, which the
+// Albums section feeds to the background enrichment. gen ties it to the libGen
+// that issued it; err is ytm.ErrNotSignedIn for an anonymous session, handled
+// like the other library loads (downgrade + sign-in hint).
 type libAggregateMsg struct {
 	gen     int
 	section string
 	tracks  []model.Track
+	missing []string
 	err     error
 }
 
@@ -709,13 +722,33 @@ func playlistTracksCmd(lib libraryProvider, id, title string, gen int) tea.Cmd {
 // librarySongsCmd fetches the whole-library aggregate for a derived section
 // (Songs/Artists/Albums) into the main view. The aggregate fans out one
 // pagination per playlist, so it gets a generous timeout; section is echoed back
-// so the handler knows how to render the result.
-func librarySongsCmd(ls librarySongsProvider, section string, gen int) tea.Cmd {
+// so the handler knows how to render the result. The cache-resident enrichment
+// fill (one disk read per track) also runs here, off the Update goroutine.
+func librarySongsCmd(ls librarySongsProvider, e *enrich.Enricher, section string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		ts, err := ls.LibrarySongs(ctx)
-		return libAggregateMsg{gen: gen, section: section, tracks: ts, err: err}
+		var missing []string
+		if err == nil && e != nil {
+			ts, missing = e.Fill(ts)
+		}
+		return libAggregateMsg{gen: gen, section: section, tracks: ts, missing: missing, err: err}
+	}
+}
+
+// libraryFillCmd re-derives a section from the SESSION-CACHED aggregate: no
+// network — only the enrichment fill (per-track disk reads, so still a Cmd, off
+// the Update goroutine) re-runs to pick up details enriched since the last
+// visit. Fill copies, so the cached slice is never mutated here.
+func libraryFillCmd(tracks []model.Track, e *enrich.Enricher, section string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		ts := tracks
+		var missing []string
+		if e != nil {
+			ts, missing = e.Fill(ts)
+		}
+		return libAggregateMsg{gen: gen, section: section, tracks: ts, missing: missing}
 	}
 }
 
@@ -1176,6 +1209,16 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// in-flight library load so it cannot replace the restored view.
 			m.albumGen++
 			m.libGen++
+			// Popping back onto the Library "Albums" list resumes its background
+			// enrichment under the NEW libGen: opening an album ('o') abandoned
+			// the in-flight chunk (deliberately), and without this re-dispatch
+			// the revealed list would silently stay partially enriched.
+			if m.stack[len(m.stack)-1].kind == mainAlbums {
+				if c := m.dispatchEnrichChunk(); c != nil {
+					m.setStatus(m.enrichStatus())
+					cmd = c
+				}
+			}
 		}
 
 	case key.Matches(msg, k.Up):
@@ -1904,29 +1947,45 @@ func (m *Model) openLikedSongs(name string) tea.Cmd {
 
 // openAggregateSection loads the whole-library aggregate for a derived section
 // (Songs/Artists/Albums). Only a source exposing LibrarySongs (the OAuth Data API
-// client) loads live; a nil/cookie source falls back to mock data.
+// client) loads live — the aggregate is fetched over the network once per
+// session and revisits reuse the cached copy (libAgg), re-running only the
+// local enrichment fill. A nil/cookie source falls back to mock data: with no
+// source at all the sign-in hint fires; a cookie session (signed in, but the
+// Data API aggregate is OAuth-only) says so explicitly instead of silently
+// presenting the demo tracks as the user's library.
 func (m *Model) openAggregateSection(name string) tea.Cmd {
 	if ls, ok := m.librarySource(); ok {
 		m.libGen++
 		m.setStatus("loading " + name + "…")
 		m.setFocus(focusMain)
-		return librarySongsCmd(ls, name, m.libGen)
+		if m.libAgg != nil {
+			return libraryFillCmd(m.libAgg, m.enr, name, m.libGen)
+		}
+		return librarySongsCmd(ls, m.enr, name, m.libGen)
 	}
 	m.setMain(name, mockLibraryTracks(name))
 	m.setFocus(focusMain)
-	if m.lib == nil && m.c != nil {
+	switch {
+	case m.lib == nil && m.c != nil:
 		m.setError("sign in to load your library — see README")
+	case m.lib != nil:
+		m.setError(name + " needs the OAuth sign-in — run tubeamp -login (showing demo data)")
 	}
 	return nil
 }
 
-// openHistory loads tubeamp's own local play history into the main view. With no
-// history store it falls back to the mock list.
+// openHistory loads tubeamp's own local play history into the main view. The
+// store read is file IO (small, but still disk), so it runs as a Cmd — never on
+// the Update goroutine — landing as a libGen-guarded libTracksMsg like the other
+// library loads. With no history store it falls back to the mock list.
 func (m *Model) openHistory(name string) tea.Cmd {
 	if m.hist != nil {
-		m.setMain("History", m.hist.List())
+		m.libGen++
 		m.setFocus(focusMain)
-		return nil
+		h, gen := m.hist, m.libGen
+		return func() tea.Msg {
+			return libTracksMsg{gen: gen, title: "History", tracks: h.List()}
+		}
 	}
 	m.setMain(name, mockLibraryTracks(name))
 	m.setFocus(focusMain)
@@ -1935,8 +1994,10 @@ func (m *Model) openHistory(name string) tea.Cmd {
 
 // applyAggregate folds a LibrarySongs result into the right derived section. A
 // stale result (the user navigated away) is dropped; ErrNotSignedIn degrades like
-// the other library loads. Cache-resident enrichment fills in albums/durations
-// instantly; the Albums section then enriches the rest in the background.
+// the other library loads. The tracks arrive with the cache-resident enrichment
+// already applied (Fill ran in the Cmd); the Albums section enriches the rest in
+// the background. A successful load also becomes the session aggregate cache, so
+// later Songs/Artists/Albums visits skip the network fan-out entirely.
 func (m Model) applyAggregate(msg libAggregateMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != m.libGen {
 		return m, nil
@@ -1951,41 +2012,28 @@ func (m Model) applyAggregate(msg libAggregateMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.status = ""
+	m.libAgg = msg.tracks
 	switch msg.section {
 	case "Songs":
-		m.setMain("Songs", m.fillFromCache(msg.tracks))
+		m.setMain("Songs", msg.tracks)
 		m.setFocus(focusMain)
 		return m, nil
 	case "Artists":
-		m.setArtists("Artists", ytdata.GroupArtists(m.fillFromCache(msg.tracks)))
+		m.setArtists("Artists", ytdata.GroupArtists(msg.tracks))
 		m.setFocus(focusMain)
 		return m, nil
 	case "Albums":
-		return m.startAlbumsSection(msg.tracks)
+		return m.startAlbumsSection(msg.tracks, msg.missing)
 	}
 	return m, nil
 }
 
-// fillFromCache returns tracks with any already-cached album/duration applied
-// (instant, no network). With no enricher it returns the tracks unchanged.
-func (m Model) fillFromCache(tracks []model.Track) []model.Track {
-	if m.enr == nil {
-		return tracks
-	}
-	filled, _ := m.enr.Fill(tracks)
-	return filled
-}
-
-// startAlbumsSection builds the Library "Albums" list from the aggregate and
-// kicks off progressive background enrichment for the tracks the Data API left
-// without an album. It does NOT bump libGen (unlike setMain): the enrichment
-// chunk Cmds ride the current libGen so they stay valid until the user navigates.
-func (m Model) startAlbumsSection(aggregate []model.Track) (tea.Model, tea.Cmd) {
-	filled := aggregate
-	var missing []string
-	if m.enr != nil {
-		filled, missing = m.enr.Fill(aggregate)
-	}
+// startAlbumsSection builds the Library "Albums" list from the (already
+// cache-filled) aggregate and kicks off progressive background enrichment for
+// the still-missing tracks the Data API left without an album. It does NOT bump
+// libGen (unlike setMain): the enrichment chunk Cmds ride the current libGen so
+// they stay valid until the user navigates.
+func (m Model) startAlbumsSection(filled []model.Track, missing []string) (tea.Model, tea.Cmd) {
 	m.enrichTracks = filled
 	m.enrichQueue = missing
 	m.enrichTotal = len(missing)
@@ -2015,7 +2063,24 @@ func (m Model) applyEnrich(msg enrichResultMsg) (tea.Model, tea.Cmd) {
 	if len(msg.details) > 0 {
 		applyDetailsToTracks(m.enrichTracks, msg.details)
 		if top := &m.stack[len(m.stack)-1]; top.kind == mainAlbums {
+			// The rebuilt list is sorted by title, so newly-resolved albums can
+			// land above the cursor and shift the rows. Mirroring the search
+			// -results refresh, a selection the user deliberately made
+			// (cursorMoved) keeps its identity (the cursor follows the album's
+			// BrowseID to its new index) instead of drifting to a neighbour.
+			selID := ""
+			if top.cursorMoved && top.cursor >= 0 && top.cursor < len(top.albums) {
+				selID = top.albums[top.cursor].BrowseID
+			}
 			top.albums = ytdata.AlbumsFromTracks(m.enrichTracks)
+			if selID != "" {
+				for i, a := range top.albums {
+					if a.BrowseID == selID {
+						top.cursor = i
+						break
+					}
+				}
+			}
 		}
 	}
 	// Drop the chunk just processed (success or not) so a failing id is never
@@ -2078,14 +2143,19 @@ func applyDetailsToTracks(tracks []model.Track, details []enrich.Detail) {
 }
 
 // recordHistoryCmd records a track to the local play history off the Update
-// goroutine. A nil history store or an empty-VideoID track is a no-op (nil Cmd).
+// goroutine. The play time is captured HERE, at Cmd creation (Update is serial,
+// so creation order is transition order), not when the Cmd goroutine happens to
+// run: Bubble Tea runs each Cmd in its own goroutine, so under fast skipping two
+// records can execute in either order — RecordAt orders by this timestamp, which
+// keeps the history most-recent-first regardless. A nil history store or an
+// empty-VideoID track is a no-op (nil Cmd).
 func (m *Model) recordHistoryCmd(t model.Track) tea.Cmd {
 	if m.hist == nil || t.VideoID == "" {
 		return nil
 	}
-	h := m.hist
+	h, at := m.hist, time.Now()
 	return func() tea.Msg {
-		_ = h.Record(t)
+		_ = h.RecordAt(t, at)
 		return nil
 	}
 }
@@ -2251,11 +2321,14 @@ func (m Model) canLoadLibrary() bool {
 // just came back as the logged-out page, so the cookie rotated mid-session
 // (Google does this within hours — see README). The header indicator switches
 // to the stale-cookie hint and library actions stop re-issuing doomed browses,
-// keeping the indicator and the library behavior consistent.
+// keeping the indicator and the library behavior consistent. The session
+// aggregate cache is dropped too: it belonged to the now-dead session, and a
+// re-login may resolve a different account.
 func (m *Model) downgradeAuth() {
 	m.authChecked = true
 	m.authSignedIn = false
 	m.authName = ""
+	m.libAgg = nil
 }
 
 // loginHint is the status shown when the OAuth session is revoked: every
